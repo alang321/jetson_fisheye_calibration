@@ -10,12 +10,17 @@ import os
 import sys
 
 # --- Configuration ---
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
+# CAPTURE resolution (High-res for saving)
+CAPTURE_WIDTH = 1640  # Or your desired high-res width
+CAPTURE_HEIGHT = 1232 # Or your desired high-res height
 FRAMERATE = 30
-STREAM_BITRATE = 2000000 # Bitrate for streaming (adjust as needed)
 
-LAPTOP_IP = '172.27.0.35' # !!! REPLACE WITH YOUR LAPTOP'S ACTUAL IP ADDRESS !!!
+# STREAM resolution (Lower, known-good for viewing)
+STREAM_WIDTH = 1280
+STREAM_HEIGHT = 720
+STREAM_BITRATE = 2000000 # Bitrate might be okay for 720p stream
+
+LAPTOP_IP = '172.27.0.35' # Your Laptop's Tailscale IP (or LAN IP if using that)
 VIDEO_PORT = 5000
 COMMAND_PORT = 5001
 
@@ -36,46 +41,41 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 # GStreamer Pipeline Construction
 def build_pipeline_string():
-    # Source pipeline - remove trailing ' !' if present
+    # Source pipeline captures at HIGH resolution
     source_pipeline = (
         f"nvarguscamerasrc ! "
         f"video/x-raw(memory:NVMM), width=(int){CAPTURE_WIDTH}, height=(int){CAPTURE_HEIGHT}, framerate=(fraction){FRAMERATE}/1 ! "
         f"nvvidconv flip-method=0 ! "
-        # Output NV12 which is commonly accepted by encoders and videoconvert
+        # Output NV12 at HIGH resolution
         f"video/x-raw(memory:NVMM), width=(int){CAPTURE_WIDTH}, height=(int){CAPTURE_HEIGHT}, format=(string)NV12"
-        # Removed the second nvvidconv and the conversion to I420 here for potential simplification
-        # If you specifically need I420 before the tee, add it back:
-        # f" ! nvvidconv ! video/x-raw(memory:NVMM), format=(string)I420"
     )
 
-    # Tee element - no trailing space needed if concatenated correctly
+    # Tee element to split the stream
     tee_pipeline = "tee name=t"
 
-    # Branch 1: Streaming to Laptop (using hardware encoder)
-    # Removed the redundant nvvidconv before the encoder
+    # Branch 1: Streaming to Laptop (Resize and then encode)
     stream_pipeline = (
-        f"t. ! queue ! nvv4l2h264enc "
-        f"bitrate={STREAM_BITRATE} preset-level=UltraFastPreset insert-sps-pps=true ! "
+        f"t. ! queue ! "
+        # <<<--- RESIZING STEP ADDED HERE --- >>>
+        f"nvvidconv ! "
+        f"video/x-raw(memory:NVMM), width=(int){STREAM_WIDTH}, height=(int){STREAM_HEIGHT}, format=(string)NV12 ! "
+        # <<<-------------------------------->>>
+        # Now encode the LOW resolution stream
+        f"nvv4l2h264enc bitrate={STREAM_BITRATE} preset-level=UltraFastPreset insert-sps-pps=true ! "
         f"h264parse ! rtph264pay config-interval=1 pt=96 ! "
         f"udpsink host={LAPTOP_IP} port={VIDEO_PORT} sync=false async=false"
     )
 
-    # Branch 2: Local capture via Appsink (converting NV12 to BGR for OpenCV)
+    # Branch 2: Local capture via Appsink (Gets the ORIGINAL HIGH resolution frames)
     capture_pipeline = (
-        f"t. ! queue ! nvvidconv ! "   # Let nvvidconv handle NVMM->System transfer.
-                                    # It will likely output a common format like I420 or NV12 in system memory.
-        # REMOVED: video/x-raw, format=(string)BGR !  <-- This was the error
-        f"videoconvert ! "             # videoconvert takes the system memory format (e.g., I420/NV12)
-                                    # and converts it to BGR.
-        f"video/x-raw, format=(string)BGR ! " # Specify BGR *output* for appsink
+        f"t. ! queue ! nvvidconv ! " # Converts high-res NV12(NVMM) -> System memory format
+        f"videoconvert ! "          # Converts system format -> BGR
+        # Output BGR at HIGH resolution for saving
+        f"video/x-raw, format=(string)BGR, width=(int){CAPTURE_WIDTH}, height=(int){CAPTURE_HEIGHT} ! "
         f"appsink name=mysink emit-signals=True max-buffers=1 drop=True"
     )
 
-    # Correct concatenation: Link source TO tee, then link FROM tee branches
-    # Note the explicit '!' linking source_pipeline to tee_pipeline.
-    # The spaces between the branch definitions are important for readability but not syntax.
     full_pipeline = f"{source_pipeline} ! {tee_pipeline} {stream_pipeline} {capture_pipeline}"
-
     print("--- GStreamer Pipeline ---")
     print(full_pipeline)
     print("--------------------------")
@@ -128,55 +128,87 @@ def command_listener():
 # Callback function for appsink to get frames
 # Callback function for appsink to get frames
 def on_new_sample(appsink):
+    """
+    Callback function for the 'new-sample' signal of the appsink.
+    Pulls the sample, extracts the buffer and capabilities,
+    maps the buffer to a NumPy array (expecting BGR format
+    at CAPTURE_WIDTH x CAPTURE_HEIGHT), and updates the global
+    latest_frame variable.
+    """
     global latest_frame
     # Emit the 'pull-sample' action signal to retrieve the sample
-    sample = appsink.emit('pull-sample') # <--- CORRECT WAY
+    sample = appsink.emit('pull-sample')
     if sample:
         buf = sample.get_buffer()
         if buf is None:
-             print("Error: Could not get buffer from sample")
-             return Gst.FlowReturn.ERROR # Or OK depending on desired behaviour
+             print("ERROR:on_new_sample: Could not get buffer from sample")
+             # Sample is automatically unreffed by GStreamer later
+             return Gst.FlowReturn.ERROR # Indicate failure
 
         caps = sample.get_caps()
         if caps is None:
-             print("Error: Could not get caps from sample")
-             return Gst.FlowReturn.ERROR # Or OK
+             print("ERROR:on_new_sample: Could not get caps from sample")
+             return Gst.FlowReturn.ERROR
 
-        # Extract frame details
+        # Extract frame details from the capabilities structure
         structure = caps.get_structure(0)
         if structure is None:
-            print("Error: Could not get structure from caps")
-            return Gst.FlowReturn.ERROR # Or OK
+            print("ERROR:on_new_sample: Could not get structure from caps")
+            return Gst.FlowReturn.ERROR
 
         # Use get_value which is safer than direct access if field might be missing
         height_res, height = structure.get_int("height")
         width_res, width = structure.get_int("width")
 
         if not height_res or not width_res:
-             print("Error: Could not get height/width from caps structure")
-             return Gst.FlowReturn.ERROR # Or OK
+             print("ERROR:on_new_sample: Could not get height/width from caps structure")
+             return Gst.FlowReturn.ERROR
+
+        # --- Verification Step ---
+        # Check if the received dimensions match the expected CAPTURE dimensions
+        if width != CAPTURE_WIDTH or height != CAPTURE_HEIGHT:
+            print(f"ERROR:on_new_sample: Unexpected frame dimensions received!")
+            print(f"  Expected: {CAPTURE_WIDTH}x{CAPTURE_HEIGHT}")
+            print(f"  Received: {width}x{height}")
+            # Depending on severity, you might try to proceed or just fail
+            return Gst.FlowReturn.ERROR
+        # --- End Verification ---
 
         # Map buffer to numpy array
         success, map_info = buf.map(Gst.MapFlags.READ)
         if success:
-            frame = np.ndarray(
-                (height, width, 3), # Assuming BGR format from videoconvert
-                buffer=map_info.data,
-                dtype=np.uint8
-            )
-            with frame_lock:
-                # Make a copy as the buffer will be unmapped
-                latest_frame = frame.copy()
-            buf.unmap(map_info)
+            try:
+                # Create NumPy array using the expected CAPTURE dimensions
+                # Assuming BGR format from the videoconvert in the capture pipeline
+                frame = np.ndarray(
+                    (CAPTURE_HEIGHT, CAPTURE_WIDTH, 3), # Use CAPTURE dimensions
+                    buffer=map_info.data,
+                    dtype=np.uint8
+                )
+
+                # Update the global variable under lock
+                with frame_lock:
+                    # Make a copy as the buffer will be unmapped when we return
+                    latest_frame = frame.copy()
+
+            except Exception as e:
+                print(f"ERROR:on_new_sample: Failed to create NumPy array: {e}")
+                buf.unmap(map_info) # Ensure unmap even on error
+                return Gst.FlowReturn.ERROR
+            finally:
+                 # Unmap the buffer in all cases after successful map
+                 buf.unmap(map_info)
+
             # Sample is automatically unreffed by GStreamer after the signal emission returns
             return Gst.FlowReturn.OK # Indicate success
         else:
-            print("Error: Failed to map buffer")
+            print("ERROR:on_new_sample: Failed to map buffer")
             # Sample is automatically unreffed
             return Gst.FlowReturn.ERROR # Indicate failure
 
-    # If emit('pull-sample') returns None (shouldn't happen if signal fired, but good practice)
-    return Gst.FlowReturn.ERROR # Or OK if no sample is not critical
+    # If emit('pull-sample') returns None (shouldn't generally happen if signal fired)
+    print("WARN:on_new_sample: emit('pull-sample') returned None")
+    return Gst.FlowReturn.OK # Or ERROR depending on how critical a missed frame is
 
 
 # Main execution
