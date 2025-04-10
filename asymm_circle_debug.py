@@ -35,9 +35,11 @@ def find_nearest_available(target_pt, available_coords, available_indices, max_d
     return original_kp_index, best_dist_sq
 
 
-def run_two_point_assisted_matching(image_to_select_on, detected_keypoints, objp, pattern_size):
+# --- Replace the run_two_point_assisted_matching function with this ---
+
+def run_four_corner_assisted_matching(image_to_select_on, detected_keypoints, objp, pattern_size):
     """
-    Uses clicks on Top-Left (TL) and Row 2 Start (R2) to order detected blobs.
+    Uses 4 corner clicks (TL, TR, BL, BR) to order the detected blobs.
 
     Args:
         image_to_select_on: Color image.
@@ -50,214 +52,226 @@ def run_two_point_assisted_matching(image_to_select_on, detected_keypoints, objp
     """
     cols, rows = pattern_size
     num_expected_points = cols * rows
-    print("\n--- Two-Point Assisted Matching ---")
+    print("\n--- Four-Corner Assisted Matching ---")
     print("Detected Blobs:", len(detected_keypoints))
-    if not detected_keypoints or len(detected_keypoints) < 2: # Need at least 2 blobs
-         print("  Error: Not enough blobs detected.")
+    # Need at least 4 blobs, ideally close to num_expected_points
+    if not detected_keypoints or len(detected_keypoints) < 4:
+         print("  Error: Not enough blobs detected (< 4).")
          return None
+    if len(detected_keypoints) < num_expected_points * 0.8: # Heuristic check
+         print(f"  Warning: Significantly fewer blobs detected ({len(detected_keypoints)}) than expected ({num_expected_points}). Matching might be inaccurate.")
 
     # Prepare display image and keypoint coordinates
     img_display = image_to_select_on.copy()
     kp_coords = np.array([kp.pt for kp in detected_keypoints], dtype=np.float32)
     for i, pt in enumerate(kp_coords):
-        cv2.circle(img_display, tuple(pt.astype(int)), 4, (0, 165, 255), 1) # Orange circles
+        pt_int = tuple(pt.astype(int))
+        cv2.circle(img_display, pt_int, 4, (0, 165, 255), 1) # Orange circles for all blobs
 
-    cv2.namedWindow("Click TL and Row 2 Start", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Click TL and Row 2 Start", 1000, 700)
+    # --- Clicking Setup ---
+    window_name = "Click 4 Corners (TL, TR, BL, BR)"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1000, 700)
 
-    clicked_kp_indices = {'TL': None, 'R2': None} # Store indices of clicked blobs
-    click_order = ['TL', 'R2']
-    current_click_idx = 0
+    corner_labels = ["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"]
+    # Grid indices for the 4 corners in objp/final_corners
+    ideal_corner_indices = [0, cols - 1, (rows - 1) * cols, num_expected_points - 1]
+    # Map labels to ideal indices for clarity
+    label_to_ideal_idx = dict(zip(corner_labels, ideal_corner_indices))
 
-    def two_point_click_callback(event, x, y, flags, param):
+    clicked_kp_indices = {} # Dict: {label: index_in_detected_keypoints}
+    current_click_idx = 0   # Index into corner_labels
+
+    def four_corner_click_callback(event, x, y, flags, param):
         nonlocal current_click_idx # Modify outer scope variable
 
-        if current_click_idx >= len(click_order):
-            # Already collected all required clicks, do nothing more
+        if current_click_idx >= len(corner_labels): # Stop if all corners are clicked
             return
-    
-        target_label = click_order[current_click_idx]
+
+        target_label = corner_labels[current_click_idx]
 
         if event == cv2.EVENT_LBUTTONDOWN:
             # Find nearest detected keypoint to the click
             distances = distance.cdist([(x, y)], kp_coords)[0]
             nearest_kp_idx = np.argmin(distances)
 
-            # Ensure the second click isn't the same blob as the first
-            if target_label == 'R2' and nearest_kp_idx == clicked_kp_indices['TL']:
-                print("  Cannot select the same blob for TL and R2. Try again.")
-                return
+            # Simple check to prevent clicking the same blob multiple times (can be improved)
+            if nearest_kp_idx in clicked_kp_indices.values():
+                 print(f"  Warning: Blob {nearest_kp_idx} already selected for another corner. Please click a different blob for {target_label}.")
+                 return
 
             clicked_kp_indices[target_label] = nearest_kp_idx
-            pt_clicked = tuple(kp_coords[nearest_kp_idx].astype(int))
-            print(f"  Clicked {target_label} near blob {nearest_kp_idx} at {pt_clicked}")
+            pt_clicked_coords = kp_coords[nearest_kp_idx]
+            print(f"  Clicked {target_label} near blob {nearest_kp_idx} at ({pt_clicked_coords[0]:.0f}, {pt_clicked_coords[1]:.0f})")
 
-            # Draw feedback (redraw to prevent overlaps)
+            # Draw feedback - redraw all labels each time
             temp_display = image_to_select_on.copy()
+            # First draw all default blobs
             for i, pt in enumerate(kp_coords):
-                clr = (0, 165, 255) # Default orange
-                lbl = ""
-                if i == clicked_kp_indices['TL']: clr, lbl = (0, 255, 0), "TL" # Green
-                if i == clicked_kp_indices['R2']: clr, lbl = (0, 255, 255), "R2" # Yellow
-                pt_int = tuple(pt.astype(int)) # Convert pt coords to integer tuple first
-                cv2.circle(temp_display, pt_int, 4 if not lbl else 6, clr, 1 if not lbl else 2)
-                if lbl:
-                    # Use integer coordinates for putText org
+                 pt_int = tuple(pt.astype(int))
+                 cv2.circle(temp_display, pt_int, 4, (0, 165, 255), 1)
+            # Then draw selected corners over them
+            corner_colors = [(0, 255, 0), (0, 255, 255), (255, 255, 0), (255, 0, 255)] # TL, TR, BL, BR
+            for i, lbl in enumerate(corner_labels):
+                if lbl in clicked_kp_indices:
+                    kp_idx = clicked_kp_indices[lbl]
+                    pt = kp_coords[kp_idx]
+                    pt_int = tuple(pt.astype(int))
+                    cv2.circle(temp_display, pt_int, 6, corner_colors[i], 2)
                     text_org = (pt_int[0] + 8, pt_int[1] + 8)
-                    cv2.putText(temp_display, lbl, text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+                    cv2.putText(temp_display, lbl[:2], text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
 
-            img_display[:] = temp_display[:] # Update the main display image
+            img_display[:] = temp_display[:] # Update main display
 
             current_click_idx += 1
-            if current_click_idx < len(click_order):
-                print(f"-> Now click: {click_order[current_click_idx]}")
+            if current_click_idx < len(corner_labels):
+                print(f"-> Now click: {corner_labels[current_click_idx]}")
             else:
-                print("-> Both points clicked. Press 'y' to proceed, 'r' to restart, 'q' to quit.")
+                print("-> All 4 corners clicked. Press 'y' to proceed, 'r' to restart, 'q' to quit.")
 
-    cv2.setMouseCallback("Click TL and Row 2 Start", two_point_click_callback)
-    print(f"-> Click the blob for: {click_order[current_click_idx]}")
+    cv2.setMouseCallback(window_name, four_corner_click_callback)
+    print(f"-> Click the blob for: {corner_labels[current_click_idx]}")
 
     # --- User Interaction Loop ---
     while True:
-        cv2.imshow("Click TL and Row 2 Start", img_display)
+        cv2.imshow(window_name, img_display)
         key = cv2.waitKey(20) & 0xFF
 
-        if current_click_idx == len(click_order) and key == ord('y'):
+        if current_click_idx == len(corner_labels) and key == ord('y'):
              break # Proceed to matching
         if key == ord('r'): # Restart clicking
-             print("Restarting point selection...")
+             print("Restarting corner selection...")
              current_click_idx = 0
-             clicked_kp_indices = {'TL': None, 'R2': None}
+             clicked_kp_indices = {}
              # Reset display image
              img_display = image_to_select_on.copy()
              for i, pt in enumerate(kp_coords):
-                 cv2.circle(img_display, tuple(pt.astype(int)), 4, (0, 165, 255), 1)
-             print(f"-> Click the blob for: {click_order[current_click_idx]}")
+                 pt_int = tuple(pt.astype(int))
+                 cv2.circle(img_display, pt_int, 4, (0, 165, 255), 1)
+             print(f"-> Click the blob for: {corner_labels[current_click_idx]}")
         if key == ord('q'):
-             print("Quit during point selection.")
-             cv2.destroyWindow("Click TL and Row 2 Start")
+             print("Quit during corner selection.")
+             cv2.destroyWindow(window_name)
              return None
         # Check if window closed
-        if cv2.getWindowProperty("Click TL and Row 2 Start", cv2.WND_PROP_VISIBLE) < 1: return None
+        if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1: return None
 
-    cv2.destroyWindow("Click TL and Row 2 Start")
+    cv2.destroyWindow(window_name)
 
-    # --- Grid Walking Logic ---
-    print("Attempting to match remaining points...")
-    if clicked_kp_indices['TL'] is None or clicked_kp_indices['R2'] is None:
-        print("  Error: Required points were not selected.")
+    # --- Perspective Transform and Matching Logic ---
+    print("Attempting to match remaining points using perspective transform...")
+    if len(clicked_kp_indices) != 4:
+        print("  Error: Did not collect 4 corner points.")
         return None
 
-    tl_kp_idx = clicked_kp_indices['TL']
-    r2_kp_idx = clicked_kp_indices['R2']
+    # Get image points (pixels) and object points (mm, XY only) for the 4 corners
+    img_pts_corners_list = []
+    obj_pts_corners_list = []
+    for label in corner_labels: # Ensure consistent order
+        kp_idx = clicked_kp_indices[label]
+        ideal_idx = label_to_ideal_idx[label]
+        img_pts_corners_list.append(kp_coords[kp_idx])
+        obj_pts_corners_list.append(objp[ideal_idx, :2]) # Use only X, Y
 
-    # Initialize final corners array and available indices
-    final_corners = np.full((num_expected_points, 1, 2), np.nan, dtype=np.float32) # Use NaN marker
-    available_indices = list(range(len(kp_coords)))
-    available_coords_list = list(kp_coords) # Use list for easy pop
+    img_pts_corners = np.array(img_pts_corners_list, dtype=np.float32)
+    obj_pts_corners = np.array(obj_pts_corners_list, dtype=np.float32)
 
-    # Assign the first point (TL)
-    final_corners[0, 0, :] = kp_coords[tl_kp_idx]
-    found_idx_in_list = available_indices.index(tl_kp_idx)
-    available_indices.pop(found_idx_in_list)
-    available_coords_list.pop(found_idx_in_list)
-    
-    # Assign the second known point (R2 Start)
-    # Check if it's still available (should be, unless same as TL was forced somehow)
-    if r2_kp_idx in available_indices:
-        final_corners[cols, 0, :] = kp_coords[r2_kp_idx]
-        found_idx_in_list = available_indices.index(r2_kp_idx)
-        available_indices.pop(found_idx_in_list)
-        available_coords_list.pop(found_idx_in_list)
+    # Estimate perspective transform (object space -> image space)
+    try:
+        # Requires exactly 4 points, non-collinear
+        H, status = cv2.findHomography(obj_pts_corners, img_pts_corners)
+        # H = cv2.getPerspectiveTransform(obj_pts_corners, img_pts_corners) # Alternative
+        if H is None or H.shape != (3, 3):
+            raise ValueError("Transform estimation failed (returned None or wrong shape)")
+        print("  Perspective transform estimated.")
+    except Exception as e:
+        print(f"  Error estimating perspective transform: {e}. Points might be collinear or inaccurate.")
+        return None
+
+    # Predict image locations for ALL objp points using the transform
+    obj_pts_all_xy = objp[:, :2].astype(np.float32).reshape(-1, 1, 2) # Reshape for perspectiveTransform
+    try:
+        predicted_img_pts_all = cv2.perspectiveTransform(obj_pts_all_xy, H)
+        if predicted_img_pts_all is None: raise ValueError("perspectiveTransform returned None")
+        predicted_img_pts_all = predicted_img_pts_all.reshape(-1, 2) # Reshape back to Nx2
+    except Exception as e:
+        print(f"  Error applying perspective transform: {e}")
+        return None
+
+
+    # --- Match detected keypoints to predicted locations ---
+    final_corners = np.full((num_expected_points, 1, 2), np.nan, dtype=np.float32) # Init with NaN
+    used_kp_indices_set = set(clicked_kp_indices.values()) # Keep track of used blob indices
+    matched_count = 0
+
+    # Assign the 4 known corners first
+    for label in corner_labels:
+        grid_idx = label_to_ideal_idx[label]
+        kp_idx = clicked_kp_indices[label]
+        final_corners[grid_idx, 0, :] = kp_coords[kp_idx]
+        matched_count += 1
+
+    # Prepare list of available keypoints (indices and coordinates) for matching inner points
+    available_indices = [i for i in range(len(kp_coords)) if i not in used_kp_indices_set]
+    if not available_indices:
+        print("  Warning: No blobs left after assigning corners.")
     else:
-         print("Error: R2 start point index somehow not available after assigning TL.")
-         return None
+        available_coords = kp_coords[available_indices]
 
-    # --- Estimate scale and initial vectors ---
-    # Vector from TL to R2 in object space (mm) and image space (pixels)
-    vec_objp_col = objp[cols] - objp[0]
-    vec_img_col = kp_coords[r2_kp_idx] - kp_coords[tl_kp_idx]
-
-    # Estimate pixel scale (pixels per object unit, e.g., px/mm)
-    # Use Y-component for vertical-ish scale, X for horizontal-ish
-    # Handle potential zero division
-    scale_y = abs(vec_img_col[1] / vec_objp_col[1]) if abs(vec_objp_col[1]) > 1e-6 else 1.0
-    scale_x = abs(vec_img_col[0] / vec_objp_col[0]) if abs(vec_objp_col[0]) > 1e-6 else scale_y # Fallback
-    scale_factor = np.array([scale_x, scale_y]) # Use separate scales
-
-    # Estimate max distance for search (e.g., half the estimated spacing in pixels)
-    # Use object spacing directly scaled
-    avg_spacing_obj = np.linalg.norm(objp[1,:2] - objp[0,:2]) # Approx spacing in obj units
-    max_dist_sq = (avg_spacing_obj * max(scale_x, scale_y) * 0.75)**2 # Squared threshold (75% of avg spacing)
-    print(f"  Estimated Scale (px/unit): {scale_factor}, Max Search Dist Sq: {max_dist_sq:.1f}")
+        # Estimate max search distance (heuristic: e.g., half the average corner spacing in pixels)
+        diag1_dist = np.linalg.norm(img_pts_corners[0] - img_pts_corners[3]) # TL-BR distance
+        diag2_dist = np.linalg.norm(img_pts_corners[1] - img_pts_corners[2]) # TR-BL distance
+        avg_diag = (diag1_dist + diag2_dist) / 2.0
+        # Estimate spacing based on diagonals and grid size
+        # This is approximate, especially for fisheye
+        approx_spacing_x_px = avg_diag / np.sqrt((cols-1)**2 + (rows-1)**2) # Very rough guess
+        max_dist_sq = (approx_spacing_x_px * 0.75)**2 # Allow search within ~75% of estimated spacing (squared)
+        print(f"  Approx pixel spacing estimate: {approx_spacing_x_px:.1f}, Max Search Dist Sq: {max_dist_sq:.1f}")
 
 
-    # --- Walk the grid ---
-    matched_count = 2 # Started with TL and R2
-    for r in range(rows):
-        for c in range(cols):
-            grid_idx = r * cols + c
+        # Match the inner points
+        for grid_idx in range(num_expected_points):
+            if grid_idx in ideal_corner_indices: continue # Skip corners
 
-            # Skip the points we already assigned
-            if grid_idx == 0 or grid_idx == cols:
-                continue
-            # Skip if already filled by chance (shouldn't happen with NaN init)
-            if not np.isnan(final_corners[grid_idx, 0, 0]):
-                continue
+            if not available_indices: # Stop if we run out of blobs
+                print(f"Warning: Ran out of available blobs trying to match grid point {grid_idx}")
+                break
 
-            # Find the previous point in the walk order to predict from
-            # Priority: Point to the left. Fallback: Point above.
-            prev_grid_idx = -1
-            vec_objp_step = None
+            pred_pt = predicted_img_pts_all[grid_idx]
 
-            if c > 0: # Try predicting from the left
-                prev_grid_idx = grid_idx - 1
-                # Check if previous point was successfully matched
-                if not np.isnan(final_corners[prev_grid_idx, 0, 0]):
-                     vec_objp_step = objp[grid_idx] - objp[prev_grid_idx]
-                else: prev_grid_idx = -1 # Cannot use this predictor
-
-            if prev_grid_idx == -1 and r > 0: # Fallback: predict from above
-                 prev_grid_idx = grid_idx - cols
-                 if not np.isnan(final_corners[prev_grid_idx, 0, 0]):
-                     vec_objp_step = objp[grid_idx] - objp[prev_grid_idx]
-                 else: prev_grid_idx = -1 # Cannot use this predictor either
-
-            if prev_grid_idx == -1:
-                print(f"  Error: Cannot find valid previous point to predict from for grid index {grid_idx}")
-                return None # Failed to walk
-
-            # Predict location
-            prev_img_pt = final_corners[prev_grid_idx, 0, :]
-            pred_img_pt = prev_img_pt + vec_objp_step[:2] * scale_factor # Scale obj vector
-
-            # Find nearest available blob
-            current_available_coords = np.array(available_coords_list) # Convert list to array for cdist
+            # Find nearest *available* keypoint to the predicted point
             matched_kp_idx, dist_sq = find_nearest_available(
-                pred_img_pt, current_available_coords, available_indices, max_dist_sq
+                pred_pt, available_coords, available_indices, max_dist_sq # Pass threshold
             )
 
             if matched_kp_idx != -1:
-                # Assign and remove
+                # Assign the matched point
                 final_corners[grid_idx, 0, :] = kp_coords[matched_kp_idx]
-                found_idx_in_list = available_indices.index(matched_kp_idx)
-                available_indices.pop(found_idx_in_list)
-                available_coords_list.pop(found_idx_in_list)
                 matched_count += 1
-                # Optional: Refine scale factor? Could make it unstable.
+
+                # Remove the matched point from the available pool
+                found_idx_in_available = available_indices.index(matched_kp_idx)
+                available_indices.pop(found_idx_in_available)
+                available_coords = np.delete(available_coords, found_idx_in_available, axis=0)
             else:
-                print(f"  Error: Failed to find suitable match for grid index {grid_idx} (predicted: {pred_img_pt.round(1)}).")
-                # Mark this point as failed explicitly if needed, or just let NaN remain
-                # Optionally: Try predicting from the *other* direction if possible? Adds complexity.
+                 print(f"  Warning: Failed to find suitable match (within dist) for grid index {grid_idx} (predicted: {pred_pt.round(1)}).")
+                 # Keep final_corners[grid_idx] as NaN
 
-    print(f"  Matched {matched_count}/{num_expected_points} points via walking.")
+
+    print(f"  Matched {matched_count}/{num_expected_points} points.")
     if matched_count != num_expected_points or np.isnan(final_corners).any():
-        print("  Warning: Could not match all expected points. Result is incomplete/incorrect.")
-        # Visualize partial result?
-        # vis_partial(image_to_select_on, final_corners, kp_coords) # Add helper if desired
-        return None # Fail if not all points matched
+        print("  Warning: Could not match all expected points or some failed. Result is incomplete/incorrect.")
+        # Optionally visualize partial result here for debugging
+        return None # Fail if not all points matched cleanly
 
+    print("  Successfully matched all points.")
     return final_corners
+
+# --- Helper function find_nearest_available (already defined in Method 2, ensure it's present) ---
+# (Make sure the find_nearest_available function from the previous implementation is still included
+#  somewhere before this new function, or copy it here if needed)
+# def find_nearest_available(target_pt, available_coords, available_indices, max_dist_sq=np.inf):
+#    ... (implementation as before) ...
 
 # --- Configuration ---
 DEFAULT_IMAGE_DIR = './calibration_images/'
@@ -676,7 +690,7 @@ for i, fname in enumerate(image_files):
             # Inside the 'if not ret:' block, when key == ord('m')
         keypoints = blob_detector.detect(processed_gray) # Make sure keypoints are detected
         if keypoints:
-            corners_manual = run_two_point_assisted_matching(img_color, keypoints, objp, pattern_size)
+            corners_manual = run_four_corner_assisted_matching(img_color, keypoints, objp, pattern_size)
             if corners_manual is not None:
                 ret = True
                 corners = corners_manual
