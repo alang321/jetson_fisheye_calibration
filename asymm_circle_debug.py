@@ -9,7 +9,7 @@ import sys
 DEFAULT_IMAGE_DIR = './calibration_images/'
 DEFAULT_GRID_COLS = 4
 DEFAULT_GRID_ROWS = 11
-DEFAULT_SPACING_MM = 20.0
+DEFAULT_SPACING_MM = 39.0
 DEFAULT_OUTPUT_FILE = 'fisheye_calibration_data.npz'
 
 # --- Argument Parsing ---
@@ -39,22 +39,94 @@ output_file = args.output
 image_extensions = args.ext
 DEBUG_MODE = args.debug
 
-pattern_size = (grid_cols, grid_rows)
+pattern_size = (grid_cols, grid_rows) # OpenCV format: (cols, rows)
 min_images_for_calib = 10 # Minimum number of good views required
 
 # --- Prepare Object Points ---
 # Create the 3D coordinates of the grid points in real-world space (e.g., mm)
 # Z=0 because the grid is planar.
 # The order must match the order circle centers are detected by findCirclesGrid.
-# For asymmetric grids, points alternate rows with an offset.
+# THIS SECTION IS MODIFIED to match the generator script's logic.
+
+print(f"\nGenerating object points for {pattern_size} grid with spacing={spacing} mm...")
 objp = np.zeros((grid_cols * grid_rows, 3), np.float32)
+
+# Use the real-world spacing value provided via the --spacing argument
+real_world_spacing = spacing # Alias for clarity
+
 for r in range(grid_rows):
     for c in range(grid_cols):
         idx = r * grid_cols + c
-        # Asymmetric grid: X alternates offset, Y increments by row
-        objp[idx, 0] = (2*c + r % 2) * spacing
-        objp[idx, 1] = r * spacing
-        objp[idx, 2] = 0 # Z coordinate is always 0 for a planar target
+
+        # --- NEW objp Calculation ---
+        # Matches the logic from generate_asymmetric_circles_grid.py
+        # Origin (0,0,0) is the center of the circle at r=0, c=0.
+
+        # Y coordinate increases linearly by row
+        objp[idx, 1] = r * real_world_spacing
+
+        # X coordinate increases linearly by column, with a half-spacing offset for odd rows
+        row_offset = (r % 2) * (real_world_spacing / 2.0)
+        objp[idx, 0] = c * real_world_spacing + row_offset
+
+        # Z coordinate is always 0 for a planar target
+        objp[idx, 2] = 0
+        # --- End NEW objp Calculation ---
+
+# draw
+# Check if objp was actually populated
+if objp.shape[0] > 0:
+    # Find the bounds of the points to determine canvas size
+    min_x = np.min(objp[:, 0])
+    max_x = np.max(objp[:, 0])
+    min_y = np.min(objp[:, 1])
+    max_y = np.max(objp[:, 1])
+
+    # Add a margin for visualization
+    vis_margin = 50 # Pixels margin around the pattern
+    point_radius = 5 # Radius of points to draw in visualization
+
+    # Calculate canvas dimensions (using ceiling to ensure points fit)
+    canvas_width = int(np.ceil(max_x - min_x)) + 2 * vis_margin
+    canvas_height = int(np.ceil(max_y - min_y)) + 2 * vis_margin
+
+    # Create a white canvas (BGR format for colored points)
+    vis_image = np.full((canvas_height, canvas_width, 3), 255, dtype=np.uint8)
+
+    print(f"  Visualization canvas size: {canvas_width}x{canvas_height}")
+    print(f"  Object point range: X [{min_x:.2f}, {max_x:.2f}], Y [{min_y:.2f}, {max_y:.2f}]")
+
+    # Draw each point onto the canvas
+    for i in range(objp.shape[0]):
+        # Get the original x, y coords
+        x_orig = objp[i, 0]
+        y_orig = objp[i, 1]
+
+        # Translate coordinates so min_x, min_y maps near the top-left margin
+        x_vis = int(round(x_orig - min_x + vis_margin))
+        y_vis = int(round(y_orig - min_y + vis_margin))
+
+        # Draw a blue circle at the translated coordinate
+        cv2.circle(vis_image, (x_vis, y_vis), point_radius, (255, 0, 0), -1) # Blue circle, filled
+
+        # Optional: Draw index number near the point
+        # cv2.putText(vis_image, str(i), (x_vis + point_radius, y_vis + point_radius),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
+
+    # Display the visualization
+    cv2.imshow("Object Point Layout (Calculated)", vis_image)
+    print("-> Displaying calculated object point layout. Press any key in the window to continue...")
+    cv2.waitKey(0)
+    cv2.destroyWindow("Object Point Layout (Calculated)") # Close only this window
+else:
+    print("  Warning: objp array is empty, cannot visualize layout.")
+
+
+# Optional: Print first few points to verify
+# print("Sample Object Points (real-world coords, e.g., mm):")
+# for i in range(min(5, len(objp))):
+#    print(f"  Point {i}: {objp[i]}")
+
 
 # Arrays to store object points and image points from all accepted images
 objpoints = [] # 3d points in real world space
@@ -305,7 +377,7 @@ for i, fname in enumerate(image_files):
                 print(f"  DEBUG: Proceeding with Preproc: {preprocess_desc}, Area: {current_min_area}-{current_max_area}")
                 break # Exit debug adjustment loop, proceed to findCirclesGrid
             elif key == ord('m'): # Switch preprocessing mode
-                debug_preprocess_mode = (debug_preprocess_mode + 1) % 2 # Cycle through 0, 1, 2, 3
+                debug_preprocess_mode = (debug_preprocess_mode + 1) % 4 # Cycle through 0, 1, 2, 3
                 print(f"  DEBUG: Switched Preprocessing Mode to {debug_preprocess_mode}")
             elif key == ord('t'): # Toggle threshold type
                 debug_thresh_type = cv2.THRESH_BINARY if debug_thresh_type == cv2.THRESH_BINARY_INV else cv2.THRESH_BINARY
