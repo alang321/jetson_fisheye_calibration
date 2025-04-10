@@ -40,25 +40,34 @@ def find_nearest_available(target_pt, available_coords, available_indices, max_d
 # --- Replace previous manual/corner functions with this ---
 # --- Replace previous manual/corner functions with this ---
 
-# --- Modified Main Function with Visualizations ---
-def run_four_corner_transform_predict_nn_match(image_to_select_on, detected_keypoints, objp, pattern_size):
+# --- Replace previous manual/corner functions with this ---
+
+def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, objp, pattern_size, visualize=True):
     """
-    Uses 4 corner clicks, predicts points via transform, then uses NN search.
-    Includes debugging visualizations.
+    Uses 4 corner clicks, predicts all points via transform to get vectors,
+    then walks the grid using vectors applied to the previously found point,
+    matching via nearest neighbor search at each step.
+
+    Args:
+        image_to_select_on: Color image.
+        detected_keypoints: List of cv2.KeyPoint found by SimpleBlobDetector.
+        objp: The (N, 3) array of ideal object points.
+        pattern_size: Tuple (cols, rows).
+
+    Returns:
+        A numpy array of shape (num_points, 1, 2) float32 corners, or None.
     """
     cols, rows = pattern_size
     num_expected_points = cols * rows
-    print("\n--- Four-Corner Transform Predict + NN Match (Debug Viz Enabled) ---")
+    print("\n--- Four-Corner + Local Vector NN Walk (Debug Viz Enabled) ---")
     print("Detected Blobs:", len(detected_keypoints))
     if not detected_keypoints or len(detected_keypoints) < 4: print("  Error: Not enough blobs detected (< 4)."); return None
-    if len(detected_keypoints) < num_expected_points * 0.8: print(f"  Warning: Significantly fewer blobs detected ({len(detected_keypoints)}) than expected ({num_expected_points}). Matching might fail.")
+    if len(detected_keypoints) < num_expected_points * 0.8: print(f"  Warning: Significantly fewer blobs detected ({len(detected_keypoints)}) than expected ({num_expected_points}).")
 
-    # --- 1. Get 4 Corner Clicks (Keep this part mostly the same) ---
+    # --- 1. Get 4 Corner Clicks (Identical to previous method) ---
     img_display_corners = image_to_select_on.copy()
     kp_coords = np.array([kp.pt for kp in detected_keypoints], dtype=np.float32)
-    # Draw initial faint blobs
-    for pt in kp_coords: cv2.circle(img_display_corners, tuple(pt.astype(int)), 3, (200, 200, 200), 1) # Faint gray
-
+    for pt in kp_coords: cv2.circle(img_display_corners, tuple(pt.astype(int)), 3, (200, 200, 200), 1)
     window_name_corners = "Click 4 Corners (TL, TR, BL, BR)"
     cv2.namedWindow(window_name_corners, cv2.WINDOW_NORMAL); cv2.resizeWindow(window_name_corners, 1000, 700)
     corner_labels = ["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"]
@@ -66,59 +75,50 @@ def run_four_corner_transform_predict_nn_match(image_to_select_on, detected_keyp
     label_to_ideal_idx = dict(zip(corner_labels, ideal_corner_indices))
     clicked_kp_indices = {}
     current_click_idx = 0
-
-    # (Keep the four_corner_click_callback function as before - it updates img_display_corners)
+    # (Include the four_corner_click_callback function here)
     def four_corner_click_callback(event, x, y, flags, param):
         nonlocal current_click_idx
         if current_click_idx >= len(corner_labels): return
         target_label = corner_labels[current_click_idx]
         if event == cv2.EVENT_LBUTTONDOWN:
-            distances = distance.cdist([(x, y)], kp_coords)[0]
-            nearest_kp_idx = np.argmin(distances)
-            if nearest_kp_idx in clicked_kp_indices.values(): print(f"  Warning: Blob {nearest_kp_idx} already selected. Click a different blob for {target_label}."); return
-            clicked_kp_indices[target_label] = nearest_kp_idx
-            pt_clicked_coords = kp_coords[nearest_kp_idx]
+            distances = distance.cdist([(x, y)], kp_coords)[0]; nearest_kp_idx = np.argmin(distances)
+            if nearest_kp_idx in clicked_kp_indices.values(): print(f"  Warning: Blob {nearest_kp_idx} already selected. Click different blob for {target_label}."); return
+            clicked_kp_indices[target_label] = nearest_kp_idx; pt_clicked_coords = kp_coords[nearest_kp_idx]
             print(f"  Clicked {target_label} near blob {nearest_kp_idx} at ({pt_clicked_coords[0]:.0f}, {pt_clicked_coords[1]:.0f})")
-            # Redraw feedback on img_display_corners
             temp_display = image_to_select_on.copy()
-            for i, pt in enumerate(kp_coords): pt_int = tuple(pt.astype(int)); cv2.circle(temp_display, pt_int, 3, (200, 200, 200), 1) # Faint blobs
-            corner_colors = [(0, 255, 0), (0, 255, 255), (255, 255, 0), (255, 0, 255)] # TL, TR, BL, BR
+            for i, pt in enumerate(kp_coords): pt_int = tuple(pt.astype(int)); cv2.circle(temp_display, pt_int, 3, (200, 200, 200), 1)
+            corner_colors = [(0, 255, 0), (0, 255, 255), (255, 255, 0), (255, 0, 255)]
             for i, lbl in enumerate(corner_labels):
                 if lbl in clicked_kp_indices:
                     kp_idx = clicked_kp_indices[lbl]; pt = kp_coords[kp_idx]; pt_int = tuple(pt.astype(int))
-                    cv2.circle(temp_display, pt_int, 6, corner_colors[i], 2); cv2.circle(temp_display, pt_int, 1, (0,0,0), -1) # Center dot
-                    text_org = (pt_int[0] + 8, pt_int[1] + 8)
-                    cv2.putText(temp_display, lbl[:2], text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
-            img_display_corners[:] = temp_display[:] # Update display
+                    cv2.circle(temp_display, pt_int, 6, corner_colors[i], 2); cv2.circle(temp_display, pt_int, 1, (0,0,0), -1)
+                    text_org = (pt_int[0] + 8, pt_int[1] + 8); cv2.putText(temp_display, lbl[:2], text_org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
+            img_display_corners[:] = temp_display[:]
             current_click_idx += 1
             if current_click_idx < len(corner_labels): print(f"-> Now click: {corner_labels[current_click_idx]}")
             else: print("-> All 4 corners clicked. Press 'y' to proceed, 'r' to restart, 'q' to quit.")
-
     cv2.setMouseCallback(window_name_corners, four_corner_click_callback)
     print(f"-> Click the blob for: {corner_labels[current_click_idx]}")
-
-    # (Keep the User Interaction Loop for corners)
+    # (Include the User Interaction Loop for corners)
     while True:
         cv2.imshow(window_name_corners, img_display_corners)
         key = cv2.waitKey(20) & 0xFF
         if current_click_idx == len(corner_labels) and key == ord('y'): break
         if key == ord('r'):
              print("Restarting corner selection..."); current_click_idx = 0; clicked_kp_indices = {}
-             img_display_corners = image_to_select_on.copy() # Reset display
-             for pt in kp_coords: cv2.circle(img_display_corners, tuple(pt.astype(int)), 3, (200, 200, 200), 1)
+             img_display_corners = image_to_select_on.copy(); [cv2.circle(img_display_corners, tuple(pt.astype(int)), 3, (200, 200, 200), 1) for pt in kp_coords]
              print(f"-> Click the blob for: {corner_labels[current_click_idx]}")
         if key == ord('q'): print("Quit during corner selection."); cv2.destroyWindow(window_name_corners); return None
         if cv2.getWindowProperty(window_name_corners, cv2.WND_PROP_VISIBLE) < 1: return None
-    cv2.destroyWindow(window_name_corners) # Close corner selection window
+    cv2.destroyWindow(window_name_corners)
 
-    # --- 2. Estimate Transform and Predict ALL Points ---
-    print("Estimating transform and predicting all grid point locations...")
+    # --- 2. Estimate Transform and Predict ALL Points (Needed for Vectors) ---
+    print("Estimating transform and predicting all points (for vector calculation)...")
     if len(clicked_kp_indices) != 4: print("  Error: Did not collect 4 corner points."); return None
-    # (Keep the transform estimation logic exactly as before)
+    # (Keep the transform estimation and prediction logic exactly as before)
     img_pts_corners_list = []; obj_pts_corners_list = []
     for label in corner_labels: kp_idx = clicked_kp_indices[label]; ideal_idx = label_to_ideal_idx[label]; img_pts_corners_list.append(kp_coords[kp_idx]); obj_pts_corners_list.append(objp[ideal_idx, :2])
-    img_pts_corners = np.array(img_pts_corners_list, dtype=np.float32)
-    obj_pts_corners = np.array(obj_pts_corners_list, dtype=np.float32)
+    img_pts_corners = np.array(img_pts_corners_list, dtype=np.float32); obj_pts_corners = np.array(obj_pts_corners_list, dtype=np.float32)
     try:
         H, _ = cv2.findHomography(obj_pts_corners, img_pts_corners, cv2.RANSAC, 3.0)
         if H is None or H.shape != (3, 3): raise ValueError("Transform estimation failed")
@@ -131,235 +131,174 @@ def run_four_corner_transform_predict_nn_match(image_to_select_on, detected_keyp
     except Exception as e: print(f"  Error applying perspective transform: {e}"); return None
     print("  Transform estimated and all points predicted.")
 
-    # --- 2.1 Visualize Predicted Points ---
-    vis_predict = image_to_select_on.copy()
-    # Draw all detected blobs faintly
-    for pt in kp_coords: cv2.circle(vis_predict, tuple(pt.astype(int)), 3, (180, 180, 180), 1)
-    # Draw predicted points as crosses
-    for i, pt in enumerate(predicted_img_pts_all):
-         pt_int = tuple(pt.astype(int))
-         # Draw a magenta cross 'x'
-         cv2.line(vis_predict, (pt_int[0]-4, pt_int[1]-4), (pt_int[0]+4, pt_int[1]+4), (255, 0, 255), 1)
-         cv2.line(vis_predict, (pt_int[0]-4, pt_int[1]+4), (pt_int[0]+4, pt_int[1]-4), (255, 0, 255), 1)
-         # Optional: Draw grid index number
-         # cv2.putText(vis_predict, str(i), (pt_int[0]+6, pt_int[1]-6), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,0,255), 1)
-    # Highlight clicked corners on this view too
-    corner_colors = [(0, 255, 0), (0, 255, 255), (255, 255, 0), (255, 0, 255)]
-    for i, lbl in enumerate(corner_labels):
-        kp_idx = clicked_kp_indices[lbl]
-        pt_int = tuple(kp_coords[kp_idx].astype(int))
-        cv2.circle(vis_predict, pt_int, 6, corner_colors[i], -1) # Filled corner blobs
-    cv2.imshow("Predicted Points (Magenta Crosses) & Corners", vis_predict)
-    print("-> Displaying predicted locations based on transform. Press any key to start NN matching...")
-    cv2.waitKey(0)
-
-
-    # --- 3. NN Matching based on Predictions ---
-    print("Starting Nearest Neighbor matching step-by-step...")
+    # --- 3. Initialize for NN Walk ---
+    print("Starting Local Vector Nearest-Neighbor walk...")
     final_corners = np.full((num_expected_points, 1, 2), np.nan, dtype=np.float32)
     available_indices = list(range(len(kp_coords)))
     available_coords = kp_coords.copy()
     matched_count = 0
 
-    # Estimate max search distance (same heuristic as before)
-    diag1_dist = np.linalg.norm(img_pts_corners[0] - img_pts_corners[3])
-    diag2_dist = np.linalg.norm(img_pts_corners[1] - img_pts_corners[2])
-    avg_diag = (diag1_dist + diag2_dist) / 2.0
-    approx_spacing_px = avg_diag / np.sqrt((cols-1)**2 + (rows-1)**2) if cols>1 and rows>1 else 50.0
-    max_dist_sq = (approx_spacing_px * 0.75)**2
-    search_radius = int(round(math.sqrt(max_dist_sq))) # For visualization circle
-    print(f"  Approx pixel spacing estimate: {approx_spacing_px:.1f}, Max Search Dist Sq: {max_dist_sq:.1f} (Radius ~{search_radius}px)")
-
-    # --- Visualization Setup for Matching Step ---
-    debug_match_win = "NN Matching Step (Press 'n': Next, 'r': Run, 'q': Quit)"
-    cv2.namedWindow(debug_match_win, cv2.WINDOW_NORMAL); cv2.resizeWindow(debug_match_win, 1000, 700)
-    run_mode = False # Start in step mode
-
-    # Remove corners from available pool initially
+    # Assign corners and remove from available pool
     indices_to_remove_from_available = []
     for label in corner_labels:
-        kp_idx = clicked_kp_indices[label]
+        grid_idx = label_to_ideal_idx[label]; kp_idx = clicked_kp_indices[label]
+        final_corners[grid_idx, 0, :] = kp_coords[kp_idx]
+        matched_count += 1
         if kp_idx in available_indices:
-            try: list_idx = available_indices.index(kp_idx); indices_to_remove_from_available.append(list_idx)
-            except ValueError: pass # Already removed somehow?
+             try: indices_to_remove_from_available.append(available_indices.index(kp_idx))
+             except ValueError: pass
     indices_to_remove_from_available.sort(reverse=True)
     for list_idx in indices_to_remove_from_available: available_indices.pop(list_idx)
     available_coords = np.delete(available_coords, indices_to_remove_from_available, axis=0)
 
-    # --- Matching Loop with Visualization ---
-    prev_found_pt = predicted_img_pts_all[0]
-    prev_pt_int = tuple(predicted_img_pts_all[0].astype(int))
-    prev_idx = 0
-
-    for row in range(rows):
-        if row % 2 == 0:
-            cols_it = range(cols)
-        else:
-            cols_it = range(cols-1, -1, -1)
-
-        for col in cols_it:
-            grid_idx = row * cols + col
-
-            if grid_idx == 0:
-                # Skip the first point, already handled
-                continue
-
-            pred_pt = predicted_img_pts_all[grid_idx]
-            prev_pred_pt = predicted_img_pts_all[prev_idx]
-            vector = pred_pt - prev_pred_pt
-            vector_int = tuple(vector.astype(int))
-
-            search_point = prev_found_pt + vector_int
-
-            final_points = find_nearest_available(
-                    pred_pt, available_coords, available_indices, max_dist_sq
-                )
-            
-            prev_found_pt = final_points
+    # Estimate max search distance (same heuristic as before)
+    diag1_dist=np.linalg.norm(final_corners[label_to_ideal_idx["Top-Left"],0,:]-final_corners[label_to_ideal_idx["Bottom-Right"],0,:])
+    diag2_dist=np.linalg.norm(final_corners[label_to_ideal_idx["Top-Right"],0,:]-final_corners[label_to_ideal_idx["Bottom-Left"],0,:])
+    avg_diag = (diag1_dist + diag2_dist) / 2.0
+    approx_spacing_px = avg_diag / np.sqrt((cols-1)**2 + (rows-1)**2) if cols>1 and rows>1 else 50.0
+    max_dist_sq = (approx_spacing_px * 0.75)**2
+    search_radius = int(round(math.sqrt(max_dist_sq)))
+    print(f"  Approx pixel spacing estimate: {approx_spacing_px:.1f}, Max Search Dist Sq: {max_dist_sq:.1f} (Radius ~{search_radius}px)")
 
 
+    # --- 4. Perform the Serpentine Grid Walk ---
+    if visualize:
+        debug_walk_win = "Local Vector NN Walk"
+        cv2.namedWindow(debug_walk_win, cv2.WINDOW_NORMAL); cv2.resizeWindow(debug_walk_win, 1000, 700)
+        run_mode = True
 
-    for i in range(1, num_expected_points):
-        if i % cols == 0: 
-            row += 1
+    # Initialize walker state
+    prev_idx = label_to_ideal_idx["Top-Left"] # Start at TL
+    prev_found_pt = final_corners[prev_idx, 0, :] # Known location of TL
 
-        if row
-            final_corners[grid_idx, 0, :] = kp_coords[corner_kp_idx]
+    # Serpentine walk order
+    walk_indices = []
+    for r in range(rows):
+        if r % 2 == 0: # Even rows: left to right
+            for c in range(cols): walk_indices.append(r * cols + c)
+        else:          # Odd rows: right to left
+            for c in range(cols - 1, -1, -1): walk_indices.append(r * cols + c)
 
 
-        pred_pt = predicted_img_pts_all[grid_idx]
-        prev_pt = predicted_img_pts_all[grid_idx]
-
-        vector = pred_pt - prev_pt
-
-        search_point
+    for current_grid_idx in walk_indices:
+        # Skip if already filled (corners or already processed)
+        if not np.isnan(final_corners[current_grid_idx, 0, 0]):
+            # If it's a point we just successfully matched, update prev state
+            # This ensures the *next* iteration uses the correct base
+            if prev_idx != current_grid_idx : # Avoid self-assignment on first iteration
+                 prev_idx = current_grid_idx
+                 prev_found_pt = final_corners[current_grid_idx, 0, :]
+            continue # Already done, move to next in walk order
 
 
         # --- Prepare visualization frame for this step ---
-        vis_step = image_to_select_on.copy()
-        # Draw all available blobs faintly
-        for k_idx in available_indices: cv2.circle(vis_step, tuple(kp_coords[k_idx].astype(int)), 3, (180, 180, 180), 1)
-        # Draw all predictions faintly
-        for p_idx, p_pt in enumerate(predicted_img_pts_all): cv2.drawMarker(vis_step, tuple(p_pt.astype(int)), (255, 200, 255), cv2.MARKER_CROSS, 8, 1) # Faint magenta cross
-         # Draw already matched points (green)
-        for m_idx in range(num_expected_points):
-             if not np.isnan(final_corners[m_idx, 0, 0]): cv2.circle(vis_step, tuple(final_corners[m_idx,0,:].astype(int)), 5, (0,180,0), -1)
-
-        # Highlight current prediction being processed
-        cv2.drawMarker(vis_step, pred_pt_int, (0, 0, 255), cv2.MARKER_CROSS, 12, 2) # Bold Red Cross
-        # Draw search radius
-        cv2.circle(vis_step, pred_pt_int, search_radius, (255, 0, 0), 1) # Blue search circle
-
-
-        match_status_text = f"Grid {grid_idx}: Pred @ ({pred_pt[0]:.0f}, {pred_pt[1]:.0f})"
-        matched_kp_idx = -1 # Reset for this iteration
-
-        # Special handling for the 4 corners
-        is_corner = False
-        corner_kp_idx = -1
-        for label, ideal_idx in label_to_ideal_idx.items():
-            if grid_idx == ideal_idx:
-                 is_corner = True
-                 corner_kp_idx = clicked_kp_indices[label]
-                 break
-
-        if is_corner:
-            # Corner point - use the clicked one
-            final_corners[grid_idx, 0, :] = kp_coords[corner_kp_idx]
-            matched_kp_idx = corner_kp_idx # Mark as matched
-            match_status_text += f" -> Corner (Blob {corner_kp_idx})"
-            # Note: corner should already be removed from available pool
-        else:
-            # Inner point: Perform NN search
-            if not available_indices:
-                match_status_text += " -> FAIL (No blobs left!)"
-            else:
-                found_kp_idx, dist_sq = find_nearest_available(
-                    pred_pt, available_coords, available_indices, max_dist_sq
-                )
-
-                if found_kp_idx != -1:
-                    # Assign the matched point
-                    final_corners[grid_idx, 0, :] = kp_coords[found_kp_idx]
-                    matched_kp_idx = found_kp_idx # Mark as matched
-                    match_status_text += f" -> MATCH Blob {found_kp_idx} (Dist: {math.sqrt(dist_sq):.1f})"
-
-                    # Highlight matched blob and draw line
-                    match_pt_int = tuple(kp_coords[found_kp_idx].astype(int))
-                    cv2.circle(vis_step, match_pt_int, 6, (0, 255, 255), 2) # Yellow highlight
-                    cv2.line(vis_step, pred_pt_int, match_pt_int, (0, 255, 0), 1) # Green line
-
-                    # Remove from available pool for next iteration
-                    idx_in_available = available_indices.index(found_kp_idx)
-                    available_indices.pop(idx_in_available)
-                    available_coords = np.delete(available_coords, idx_in_available, axis=0)
-                else:
-                    match_status_text += f" -> NO MATCH (Radius {search_radius}px)"
-                    # Highlight prediction in bright red to show failure
-                    cv2.circle(vis_step, pred_pt_int, search_radius, (0, 0, 255), 2)
-
 
         # Add text and display
-        cv2.putText(vis_step, match_status_text, (10, vis_step.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
-        cv2.imshow(debug_match_win, vis_step)
+        if visualize:
+            vis_step = image_to_select_on.copy()
+            # Draw all available blobs faintly
+            for k_idx in available_indices: cv2.circle(vis_step, tuple(kp_coords[k_idx].astype(int)), 3, (180, 180, 180), 1)
+            # Draw already matched points (green circles)
+            for m_idx in range(num_expected_points):
+                if not np.isnan(final_corners[m_idx, 0, 0]): cv2.circle(vis_step, tuple(final_corners[m_idx,0,:].astype(int)), 5, (0,180,0), -1)
+            # Highlight the previous successfully found point
+            cv2.circle(vis_step, tuple(prev_found_pt.astype(int)), 7, (0, 255, 0), 2) # Bright green circle
 
-        # --- Wait for user input (step/run/quit) ---
-        if not run_mode:
-            key = cv2.waitKey(0) & 0xFF # Wait indefinitely in step mode
+
+        # Get predicted locations from global transform for current and previous ideal points
+        pred_pt_current_ideal = predicted_img_pts_all[current_grid_idx]
+        pred_pt_prev_ideal = predicted_img_pts_all[prev_idx]
+
+        # Calculate the *predicted vector* between these ideal locations
+        vector_pred = pred_pt_current_ideal - pred_pt_prev_ideal
+
+        # Calculate the *search point* by applying the vector to the *last found* point
+        search_point = prev_found_pt + vector_pred
+        search_point_int = tuple(search_point.astype(int))
+
+        # --- Draw prediction details on vis_step ---
+
+        # Add text and display
+        if visualize:
+            cv2.line(vis_step, tuple(prev_found_pt.astype(int)), search_point_int, (255, 255, 0), 1) # Cyan vector line
+            cv2.drawMarker(vis_step, search_point_int, (0, 0, 255), cv2.MARKER_CROSS, 12, 2) # Bold Red Cross at search point
+            cv2.circle(vis_step, search_point_int, search_radius, (255, 0, 0), 1) # Blue search circle
+
+        match_status_text = f"Grid {current_grid_idx} (from {prev_idx}): Search @ ({search_point[0]:.0f}, {search_point[1]:.0f})"
+        matched_kp_idx = -1 # Reset
+
+        # --- Perform NN Search ---
+        if not available_indices:
+            match_status_text += " -> FAIL (No blobs left!)"
         else:
-            key = cv2.waitKey(50) & 0xFF # Short delay in run mode
+            found_kp_idx, dist_sq = find_nearest_available(
+                search_point, available_coords, available_indices, max_dist_sq
+            )
 
-        if key == ord('q'): print("Quit during NN matching."); cv2.destroyAllWindows(); return None
-        if key == ord('r'): print("Switching to Run mode"); run_mode = True
-        if key == ord(' '): print("Switching to Step mode"); run_mode = False # Space to pause
-        # Any other key (like 'n' or Enter) just proceeds to next step
+            if found_kp_idx != -1:
+                # Assign the matched point
+                found_pt = kp_coords[found_kp_idx]
+                final_corners[current_grid_idx, 0, :] = found_pt
+                matched_kp_idx = found_kp_idx
+                match_status_text += f" -> MATCH Blob {found_kp_idx} (Dist: {math.sqrt(dist_sq):.1f})"
+
+                # Update state *for the next iteration*
+                prev_found_pt = found_pt # Use the newly found point as the base
+                prev_idx = current_grid_idx
+
+                # Draw match details
+                match_pt_int = tuple(found_pt.astype(int))
+
+                # Add text and display
+                if visualize:
+                    cv2.circle(vis_step, match_pt_int, 6, (0, 255, 255), 2) # Yellow highlight
+                    cv2.line(vis_step, search_point_int, match_pt_int, (0, 255, 0), 1) # Green line to match
+
+                # Remove from available pool
+                idx_in_available = available_indices.index(found_kp_idx)
+                available_indices.pop(idx_in_available)
+                available_coords = np.delete(available_coords, idx_in_available, axis=0)
+                matched_count += 1 # Increment count here
+
+            else:
+                match_status_text += f" -> NO MATCH (Radius {search_radius}px)"
+                # Highlight search point / circle in bright red
+                
+                # Add text and display
+                if visualize:
+                        cv2.circle(vis_step, search_point_int, search_radius, (0, 0, 255), 2)
+                        # CRITICAL: Do NOT update prev_found_pt or prev_idx if no match!
+
+        # Add text and display
+        if visualize:
+            cv2.putText(vis_step, match_status_text, (10, vis_step.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+            cv2.imshow(debug_walk_win, vis_step)
+
+            # --- Wait for user input ---
+            if not run_mode: key = cv2.waitKey(0) & 0xFF
+            else: key = cv2.waitKey(1) & 0xFF # Very short delay in run mode for viz update
+
+            if key == ord('r'): print("Switching to Run mode"); run_mode = True
 
 
-    # --- End Matching Loop ---
-    try: cv2.destroyWindow(debug_match_win)
+    # --- 5. Final Check and Visualization (Identical to previous method) ---
+    try: cv2.destroyWindow(debug_walk_win)
     except: pass
-    cv2.destroyWindow("Predicted Points (Magenta Crosses) & Corners")
 
+    final_matched_count = num_expected_points - np.count_nonzero(np.isnan(final_corners[:,0,0]))
+    print(f"Finished local vector walk. Matched {final_matched_count}/{num_expected_points} points.")
 
-    # --- 4. Final Check and Visualization ---
-    matched_count = num_expected_points - np.count_nonzero(np.isnan(final_corners[:,0,0]))
-    print(f"Finished NN matching. Matched {matched_count}/{num_expected_points} points.")
-
-    vis_final = image_to_select_on.copy()
-    # Draw final matched points
-    for r in range(rows):
-        for c in range(cols):
-            idx = r*cols + c
-            if not np.isnan(final_corners[idx, 0, 0]):
-                 pt = final_corners[idx, 0, :].astype(int)
-                 cv2.circle(vis_final, tuple(pt), 5, (0, 255, 0), -1) # Green filled circles
-                 # Draw lines to neighbors (optional, can get messy)
-                 # Check right neighbor
-                 if c + 1 < cols:
-                     idx_right = idx + 1
-                     if not np.isnan(final_corners[idx_right, 0, 0]):
-                         pt_right = final_corners[idx_right, 0, :].astype(int)
-                         cv2.line(vis_final, tuple(pt), tuple(pt_right), (0, 200, 0), 1)
-                 # Check bottom neighbor
-                 if r + 1 < rows:
-                     idx_down = idx + cols
-                     if not np.isnan(final_corners[idx_down, 0, 0]):
-                         pt_down = final_corners[idx_down, 0, :].astype(int)
-                         cv2.line(vis_final, tuple(pt), tuple(pt_down), (0, 200, 0), 1)
-
-
-    cv2.imshow("Final Matched Points", vis_final)
-    print("-> Displaying final matched points. Press any key to accept/reject...")
-    cv2.waitKey(0)
-    cv2.destroyWindow("Final Matched Points")
-
-
-    if matched_count != num_expected_points or np.isnan(final_corners).any():
+    if final_matched_count != num_expected_points or np.isnan(final_corners).any():
         print("  Warning: Failed to match all points cleanly. Result is incomplete/incorrect.")
         return None
 
-    print("  Successfully matched all points via Transform Predict + NN.")
+    print("  Successfully matched all points via Local Vector NN Walk.")
     return final_corners
+
+
+# --- Ensure find_nearest_available helper is defined somewhere above ---
+# def find_nearest_available(target_pt, available_coords, available_indices, max_dist_sq=np.inf):
+#    ... (implementation as before) ...
 
 # --- Configuration ---
 DEFAULT_IMAGE_DIR = './calibration_images/'
@@ -382,8 +321,9 @@ parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT_FILE,
                     help=f'Output file path for calibration data (.npz) (default: {DEFAULT_OUTPUT_FILE})')
 parser.add_argument('--ext', type=str, nargs='+', default=['jpg', 'png', 'bmp', 'tif', 'jpeg'],
                     help='Image file extensions to process (default: jpg png bmp tif jpeg)')
-parser.add_argument('--debug', action='store_true',
-                    help='Enable debug mode: visualize preprocessing and blob detection.')
+parser.add_argument('--visualize_serpentine', action='store_true',
+                    help='Visualize serpentine grid detection.')
+
 args = parser.parse_args()
 
 # --- Setup ---
@@ -393,7 +333,6 @@ grid_rows = args.rows
 spacing = args.spacing
 output_file = args.output
 image_extensions = args.ext
-DEBUG_MODE = args.debug
 
 pattern_size = (grid_cols, grid_rows) # OpenCV format: (cols, rows)
 min_images_for_calib = 10 # Minimum number of good views required
@@ -469,6 +408,26 @@ if objp.shape[0] > 0:
         # cv2.putText(vis_image, str(i), (x_vis + point_radius, y_vis + point_radius),
         #             cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
 
+    # draw dimensions
+    # Draw lines to indicate the grid spacing dimensions on the canvas
+
+    # Calculate the start point (corresponding to the origin of objp)
+    origin = (int(round(vis_margin)), int(round(vis_margin)))
+
+    # Horizontal measurement: from the first point to where the next point should be in x-direction
+    pt_horizontal = (int(round(real_world_spacing + vis_margin)), int(round(vis_margin)))
+    cv2.line(vis_image, origin, pt_horizontal, (0, 0, 0), 2)
+    # Label the horizontal spacing
+    mid_horizontal = ((origin[0] + pt_horizontal[0]) // 2, origin[1] - 10)
+    cv2.putText(vis_image, f"{real_world_spacing} mm", mid_horizontal, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
+
+    # Vertical measurement: from the first point to where the next point should be in y-direction
+    pt_vertical = (int(round(vis_margin)), int(round(real_world_spacing + vis_margin)))
+    cv2.line(vis_image, origin, pt_vertical, (0, 0, 0), 2)
+    # Label the vertical spacing
+    mid_vertical = (origin[0] + 20, (origin[1] + pt_vertical[1]) // 2)
+    cv2.putText(vis_image, f"{real_world_spacing} mm", mid_vertical, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
+
     # Display the visualization
     cv2.imshow("Object Point Layout (Calculated)", vis_image)
     print("-> Displaying calculated object point layout. Press any key in the window to continue...")
@@ -476,12 +435,6 @@ if objp.shape[0] > 0:
     cv2.destroyWindow("Object Point Layout (Calculated)") # Close only this window
 else:
     print("  Warning: objp array is empty, cannot visualize layout.")
-
-
-# Optional: Print first few points to verify
-# print("Sample Object Points (real-world coords, e.g., mm):")
-# for i in range(min(5, len(objp))):
-#    print(f"  Point {i}: {objp[i]}")
 
 
 # Arrays to store object points and image points from all accepted images
@@ -566,38 +519,35 @@ def set_thresh(val):
 img_shape = None # Store image shape (height, width)
 
 print("\nProcessing images...")
-if not DEBUG_MODE:
-    print("Press 'y' to accept detection, 'n' to reject, 'q' to quit during final view.")
+print("Press 'y' to accept detection, 'n' to reject, 'q' to quit during final view.")
 
-if DEBUG_MODE:
-    print("--- DEBUG MODE ENABLED ---")
-    print("Debug View Controls:")
-    print("  'm': Switch Preprocessing (None -> Manual -> Adaptive -> CLAHE)")
-    print("  't': Toggle Threshold Type (Binary / Binary Inv) for Manual/Adaptive")
-    print("  ' ' (Space): Process this image with current settings & try findCirclesGrid")
-    print("  's': Skip this image")
-    print("  'q': Quit application")
-    print("  Use sliders in 'Controls' window to adjust thresholds and blob area.")
-    print("\nFinal Confirmation View Controls (after finding grid in Debug mode):")
-    print("  'y': Accept detection for calibration")
-    print("  'n': Reject detection")
-    print("  'q': Quit application")
+print("Debug View Controls:")
+print("  'm': Switch Preprocessing (CLAHE -> None -> Manual -> Adaptive)")
+print("  't': Toggle Threshold Type (Binary / Binary Inv) for Manual/Adaptive")
+print("  ' ' (Space): Process this image with current settings & try findCirclesGrid")
+print("  's': Skip this image")
+print("  'q': Quit application")
+print("  Use sliders in 'Controls' window to adjust thresholds and blob area.")
+print("\nFinal Confirmation View Controls (after finding grid in Debug mode):")
+print("  'y': Accept detection for calibration")
+print("  'n': Reject detection")
+print("  'q': Quit application")
 
-    # Create windows for debug mode
-    cv2.namedWindow('Debug View', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Debug View', 1200, 400) # Adjust size (W, H) - assuming 3 horizontal panels
-    cv2.namedWindow('Controls', cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_EXPANDED) # Added flag for better layout
-    cv2.resizeWindow('Controls', 400, 200) # Adjust size
+# Create windows for debug mode
+cv2.namedWindow('Debug View', cv2.WINDOW_NORMAL)
+cv2.resizeWindow('Debug View', 1200, 400) # Adjust size (W, H) - assuming 3 horizontal panels
+cv2.namedWindow('Controls', cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_EXPANDED) # Added flag for better layout
+cv2.resizeWindow('Controls', 400, 200) # Adjust size
 
-    # Create Trackbars
-    cv2.createTrackbar('Manual Thresh', 'Controls', manual_thresh_value, 255, set_thresh)
-    cv2.createTrackbar('Min Area', 'Controls', current_min_area, 5000, set_min_area) # Adjust range 0-5000 as needed
-    cv2.createTrackbar('Max Area', 'Controls', current_max_area, max_area_slider_limit, set_max_area)
+# Create Trackbars
+cv2.createTrackbar('Manual Thresh', 'Controls', manual_thresh_value, 255, set_thresh)
+cv2.createTrackbar('Min Area', 'Controls', current_min_area, 5000, set_min_area) # Adjust range 0-5000 as needed
+cv2.createTrackbar('Max Area', 'Controls', current_max_area, max_area_slider_limit, set_max_area)
 
-    # Initialize debug state variables
-    debug_preprocess_mode = 0 # 0: None, 1: Manual, 2: Adaptive, 3: CLAHE
-    debug_thresh_type = cv2.THRESH_BINARY # Start with Binary
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+# Initialize debug state variables
+debug_preprocess_mode = 0 # 0: None, 1: Manual, 2: Adaptive, 3: CLAHE
+debug_thresh_type = cv2.THRESH_BINARY # Start with Binary
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
 
 processed_count = 0
 accepted_count = 0
@@ -623,137 +573,134 @@ for i, fname in enumerate(image_files):
     processed_gray = gray # Default: use original gray image if not debugging or if mode is 'None'
 
     # --- DEBUG MODE: Interactive Preprocessing & Visualization ---
-    if DEBUG_MODE:
-        while True: # Loop for interactive debugging adjustments
-            vis_list = []
+    while True: # Loop for interactive debugging adjustments
+        vis_list = []
 
-            # --- 1. Original Color Image (scaled) ---
-            h_orig_color, w_orig_color = img_color.shape[:2]
-            max_h_vis = 350 # Max height for visualization panels
-            scale = max_h_vis / h_orig_color if h_orig_color > 0 else 1
-            vis_width = int(w_orig_color * scale)
-            vis_height = int(h_orig_color * scale)
-            vis_dim = (vis_width, vis_height)
+        # --- 1. Original Color Image (scaled) ---
+        h_orig_color, w_orig_color = img_color.shape[:2]
+        max_h_vis = 350 # Max height for visualization panels
+        scale = max_h_vis / h_orig_color if h_orig_color > 0 else 1
+        vis_width = int(w_orig_color * scale)
+        vis_height = int(h_orig_color * scale)
+        vis_dim = (vis_width, vis_height)
 
-            vis_orig = cv2.resize(img_color, vis_dim, interpolation=cv2.INTER_AREA)
-            cv2.putText(vis_orig, 'Original', (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            vis_list.append(vis_orig)
+        vis_orig = cv2.resize(img_color, vis_dim, interpolation=cv2.INTER_AREA)
+        cv2.putText(vis_orig, 'Original', (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        vis_list.append(vis_orig)
 
-            # --- 2. Apply Selected Preprocessing ---
-            preprocess_desc = ""
-            # Apply preprocessing to a temporary variable for visualization
-            if debug_preprocess_mode == 1: # Manual Threshold
-                _, processed_gray_dbg = cv2.threshold(gray, manual_thresh_value, 255, debug_thresh_type)
-                preprocess_desc = f"Manual Th: {manual_thresh_value}, T:{'BIN' if debug_thresh_type==cv2.THRESH_BINARY else 'INV'}"
-            elif debug_preprocess_mode == 2: # Adaptive Threshold
-                 # Block size must be odd and >= 3
-                 # Link trackbar crudely for block size adjustment (example)
-                 block_size = 11 + 2 * (manual_thresh_value // 32)
-                 block_size = max(3, block_size | 1) # Ensure odd >= 3
-                 C = 2 # Constant subtracted
-                 processed_gray_dbg = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                                    debug_thresh_type, block_size, C)
-                 preprocess_desc = f"Adaptive G Th: B:{block_size}, C:{C}, T:{'BIN' if debug_thresh_type==cv2.THRESH_BINARY else 'INV'}"
-            elif debug_preprocess_mode == 3: # CLAHE
-                processed_gray_dbg = clahe.apply(gray)
-                preprocess_desc = "CLAHE Contrast"
-            else: # Mode 0: None (Use original grayscale)
-                processed_gray_dbg = gray.copy()
-                preprocess_desc = "Raw Grayscale"
+        # --- 2. Apply Selected Preprocessing ---
+        preprocess_desc = ""
+        # Apply preprocessing to a temporary variable for visualization
+        if debug_preprocess_mode == 2: # Manual Threshold
+            _, processed_gray_dbg = cv2.threshold(gray, manual_thresh_value, 255, debug_thresh_type)
+            preprocess_desc = f"Manual Th: {manual_thresh_value}, T:{'BIN' if debug_thresh_type==cv2.THRESH_BINARY else 'INV'}"
+        elif debug_preprocess_mode == 3: # Adaptive Threshold
+                # Block size must be odd and >= 3
+                # Link trackbar crudely for block size adjustment (example)
+                block_size = 11 + 2 * (manual_thresh_value // 32)
+                block_size = max(3, block_size | 1) # Ensure odd >= 3
+                C = 2 # Constant subtracted
+                processed_gray_dbg = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                debug_thresh_type, block_size, C)
+                preprocess_desc = f"Adaptive G Th: B:{block_size}, C:{C}, T:{'BIN' if debug_thresh_type==cv2.THRESH_BINARY else 'INV'}"
+        elif debug_preprocess_mode == 0: # CLAHE
+            processed_gray_dbg = clahe.apply(gray)
+            preprocess_desc = "CLAHE Contrast"
+        elif debug_preprocess_mode == 1: # Mode 0: None (Use original grayscale)
+            processed_gray_dbg = gray.copy()
+            preprocess_desc = "Raw Grayscale"
 
-            # Prepare processed image for visualization (convert to BGR)
-            vis_proc = cv2.cvtColor(processed_gray_dbg, cv2.COLOR_GRAY2BGR)
-            vis_proc = cv2.resize(vis_proc, vis_dim, interpolation=cv2.INTER_NEAREST) # Nearest to see pixels if needed
-            cv2.putText(vis_proc, preprocess_desc, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            vis_list.append(vis_proc)
+        # Prepare processed image for visualization (convert to BGR)
+        vis_proc = cv2.cvtColor(processed_gray_dbg, cv2.COLOR_GRAY2BGR)
+        vis_proc = cv2.resize(vis_proc, vis_dim, interpolation=cv2.INTER_NEAREST) # Nearest to see pixels if needed
+        cv2.putText(vis_proc, preprocess_desc, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        vis_list.append(vis_proc)
 
-            # --- Update Blob Detector Parameters from Sliders ---
-            # Ensure min < max from sliders
-            if current_min_area >= current_max_area:
-                 current_max_area = current_min_area + 1
-                 # Optional: Update slider position visually (might flicker)
-                 # cv2.setTrackbarPos('Max Area', 'Controls', current_max_area)
+        # --- Update Blob Detector Parameters from Sliders ---
+        # Ensure min < max from sliders
+        if current_min_area >= current_max_area:
+                current_max_area = current_min_area + 1
+                # Optional: Update slider position visually (might flicker)
+                # cv2.setTrackbarPos('Max Area', 'Controls', current_max_area)
 
-            params.minArea = current_min_area
-            params.maxArea = current_max_area
-            # Re-create detector with updated area params
-            blob_detector = cv2.SimpleBlobDetector_create(params)
+        params.minArea = current_min_area
+        params.maxArea = current_max_area
+        # Re-create detector with updated area params
+        blob_detector = cv2.SimpleBlobDetector_create(params)
 
-            # --- 3. Detect Blobs on the full-resolution processed image ---
-            keypoints = blob_detector.detect(processed_gray_dbg) # Detect on full-res DBG image
+        # --- 3. Detect Blobs on the full-resolution processed image ---
+        keypoints = blob_detector.detect(processed_gray_dbg) # Detect on full-res DBG image
 
-            # --- Create scaled keypoints specifically for visualization ---
-            scaled_keypoints = []
-            h_detect, w_detect = processed_gray_dbg.shape[:2] # Dimensions blobs were detected on
-            h_vis_draw, w_vis_draw = vis_orig.shape[:2]      # Dimensions of the image to draw on
+        # --- Create scaled keypoints specifically for visualization ---
+        scaled_keypoints = []
+        h_detect, w_detect = processed_gray_dbg.shape[:2] # Dimensions blobs were detected on
+        h_vis_draw, w_vis_draw = vis_orig.shape[:2]      # Dimensions of the image to draw on
 
-            if h_detect > 0 and w_detect > 0:
-                scale_x = w_vis_draw / w_detect
-                scale_y = h_vis_draw / h_detect
-                vis_scale = (scale_x + scale_y) / 2.0 # Average scale for size
+        if h_detect > 0 and w_detect > 0:
+            scale_x = w_vis_draw / w_detect
+            scale_y = h_vis_draw / h_detect
+            vis_scale = (scale_x + scale_y) / 2.0 # Average scale for size
 
-                if keypoints: # Check if keypoints list is not empty
-                    for kp in keypoints:
-                        # Scale the coordinates
-                        scaled_pt_x = kp.pt[0] * scale_x
-                        scaled_pt_y = kp.pt[1] * scale_y
-                        # Scale the size
-                        scaled_size = kp.size * vis_scale
-                        # Create a new KeyPoint object with scaled values
-                        scaled_kp = cv2.KeyPoint(x=scaled_pt_x, y=scaled_pt_y, size=max(1, scaled_size), # Ensure size > 0
-                                                  angle=kp.angle, response=kp.response, octave=kp.octave,
-                                                  class_id=kp.class_id)
-                        scaled_keypoints.append(scaled_kp)
+            if keypoints: # Check if keypoints list is not empty
+                for kp in keypoints:
+                    # Scale the coordinates
+                    scaled_pt_x = kp.pt[0] * scale_x
+                    scaled_pt_y = kp.pt[1] * scale_y
+                    # Scale the size
+                    scaled_size = kp.size * vis_scale
+                    # Create a new KeyPoint object with scaled values
+                    scaled_kp = cv2.KeyPoint(x=scaled_pt_x, y=scaled_pt_y, size=max(1, scaled_size), # Ensure size > 0
+                                                angle=kp.angle, response=kp.response, octave=kp.octave,
+                                                class_id=kp.class_id)
+                    scaled_keypoints.append(scaled_kp)
 
-            # --- Draw the SCALED keypoints onto the SCALED visualization image ---
-            vis_blobs = vis_orig.copy() # Draw on a fresh copy of the scaled original
-            vis_blobs = cv2.drawKeypoints(
-                vis_blobs,          # The scaled image to draw on
-                scaled_keypoints,   # The list of *scaled* keypoints
-                np.array([]),
-                (0, 0, 255),        # Red blobs
-                cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS # Draws circles proportional to size
-            )
-            blob_text = f'Blobs: {len(keypoints)} (Area:{current_min_area}-{current_max_area})'
-            cv2.putText(vis_blobs, blob_text, (10, vis_blobs.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-            vis_list.append(vis_blobs)
+        # --- Draw the SCALED keypoints onto the SCALED visualization image ---
+        vis_blobs = vis_orig.copy() # Draw on a fresh copy of the scaled original
+        vis_blobs = cv2.drawKeypoints(
+            vis_blobs,          # The scaled image to draw on
+            scaled_keypoints,   # The list of *scaled* keypoints
+            np.array([]),
+            (0, 0, 255),        # Red blobs
+            cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS # Draws circles proportional to size
+        )
+        blob_text = f'Blobs: {len(keypoints)} (Area:{current_min_area}-{current_max_area})'
+        cv2.putText(vis_blobs, blob_text, (10, vis_blobs.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+        vis_list.append(vis_blobs)
 
-            # --- Display Debug Views ---
-            # Ensure all images have the same height before stacking
-            final_h = max(img.shape[0] for img in vis_list)
-            vis_list_resized = [cv2.resize(img, (int(img.shape[1] * final_h / img.shape[0]), final_h)) if img.shape[0] != final_h else img for img in vis_list]
-            debug_vis = np.hstack(vis_list_resized)
-            cv2.imshow('Debug View', debug_vis)
-            key = cv2.waitKey(10) & 0xFF # Use waitKey(10) for responsiveness to sliders
+        # --- Display Debug Views ---
+        # Ensure all images have the same height before stacking
+        final_h = max(img.shape[0] for img in vis_list)
+        vis_list_resized = [cv2.resize(img, (int(img.shape[1] * final_h / img.shape[0]), final_h)) if img.shape[0] != final_h else img for img in vis_list]
+        debug_vis = np.hstack(vis_list_resized)
+        cv2.imshow('Debug View', debug_vis)
+        key = cv2.waitKey(10) & 0xFF # Use waitKey(10) for responsiveness to sliders
 
-            # --- Handle Debug Keystrokes ---
-            if key == ord(' '): # Space: Proceed with findCirclesGrid using current settings
-                # Set the processed_gray that will be used by findCirclesGrid
-                processed_gray = processed_gray_dbg
-                print(f"  DEBUG: Proceeding with Preproc: {preprocess_desc}, Area: {current_min_area}-{current_max_area}")
-                break # Exit debug adjustment loop, proceed to findCirclesGrid
-            elif key == ord('m'): # Switch preprocessing mode
-                debug_preprocess_mode = (debug_preprocess_mode + 1) % 4 # Cycle through 0, 1, 2, 3
-                print(f"  DEBUG: Switched Preprocessing Mode to {debug_preprocess_mode}")
-            elif key == ord('t'): # Toggle threshold type
-                debug_thresh_type = cv2.THRESH_BINARY if debug_thresh_type == cv2.THRESH_BINARY_INV else cv2.THRESH_BINARY
-                print(f"  DEBUG: Switched Threshold Type to {'BINARY' if debug_thresh_type==cv2.THRESH_BINARY else 'BINARY_INV'}")
-            elif key == ord('s'): # Skip image
-                print("  Skipped (Debug).")
-                processed_gray = None # Signal to skip findCirclesGrid
-                break
-            elif key == ord('q'): # Quit
-                print("\nQuitting application.")
-                cv2.destroyAllWindows()
-                sys.exit(0)
+        # --- Handle Debug Keystrokes ---
+        if key == ord(' '): # Space: Proceed with findCirclesGrid using current settings
+            # Set the processed_gray that will be used by findCirclesGrid
+            processed_gray = processed_gray_dbg
+            print(f"  DEBUG: Proceeding with Preproc: {preprocess_desc}, Area: {current_min_area}-{current_max_area}")
+            break # Exit debug adjustment loop, proceed to findCirclesGrid
+        elif key == ord('m'): # Switch preprocessing mode
+            debug_preprocess_mode = (debug_preprocess_mode + 1) % 4 # Cycle through 0, 1, 2, 3
+            print(f"  DEBUG: Switched Preprocessing Mode to {debug_preprocess_mode}")
+        elif key == ord('t'): # Toggle threshold type
+            debug_thresh_type = cv2.THRESH_BINARY if debug_thresh_type == cv2.THRESH_BINARY_INV else cv2.THRESH_BINARY
+            print(f"  DEBUG: Switched Threshold Type to {'BINARY' if debug_thresh_type==cv2.THRESH_BINARY else 'BINARY_INV'}")
+        elif key == ord('s'): # Skip image
+            print("  Skipped (Debug).")
+            processed_gray = None # Signal to skip findCirclesGrid
+            break
+        elif key == ord('q'): # Quit
+            print("\nQuitting application.")
+            cv2.destroyAllWindows()
+            sys.exit(0)
             # Else: trackbar change or other key, loop again to update view
 
-        # --- End of Debug adjustment loop ---
-        if processed_gray is None: # Image was skipped in debug mode
-            processed_count += 1
-            continue # Go to next image
-
-    # --- End of DEBUG_MODE block ---
+    # --- End of Debug adjustment loop ---
+    if processed_gray is None: # Image was skipped in debug mode
+        processed_count += 1
+        continue # Go to next image
 
     # --- Find the circle grid centers ---
     # Use the 'processed_gray' which was determined above (either original gray or from debug step)
@@ -778,7 +725,7 @@ for i, fname in enumerate(image_files):
             # Inside the 'if not ret:' block, when key == ord('m')
         keypoints = blob_detector.detect(processed_gray) # Make sure keypoints are detected
         if keypoints:
-            corners_manual = run_four_corner_transform_predict_nn_match(img_color, keypoints, objp, pattern_size)
+            corners_manual = run_four_corner_local_vector_walk(img_color, keypoints, objp, pattern_size, args.visualize_serpentine)
             if corners_manual is not None:
                 ret = True
                 corners = corners_manual
@@ -811,7 +758,7 @@ for i, fname in enumerate(image_files):
             key = cv2.waitKey(0) & 0xFF # Wait indefinitely for user input
             if key == ord('y'):
                 print("  Accepted.")
-                objpoints.append(objp)
+                objpoints.append(objp.reshape(-1, 1, 3))
                 imgpoints.append(corners) # Append the detected corners
                 accepted_count += 1
                 processed_image_filenames.append(fname) # Store filename for accepted view
@@ -832,11 +779,8 @@ for i, fname in enumerate(image_files):
 
 
 # --- End of Image Processing Loop ---
-
-# Clean up debug windows if they were opened
-if DEBUG_MODE:
-    cv2.destroyWindow('Debug View')
-    cv2.destroyWindow('Controls')
+cv2.destroyWindow('Debug View')
+cv2.destroyWindow('Controls')
 cv2.destroyAllWindows() # Close any other remaining OpenCV windows
 
 # --- Perform Calibration ---
