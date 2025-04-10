@@ -92,11 +92,55 @@ for i, fname in enumerate(image_files):
          continue
 
     gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+    gray_blur = cv2.GaussianBlur(gray, (5, 5), 0) # Optional blur to reduce noise first
 
-    # Find the circle grid centers
-    # Flags: CALIB_CB_ASYMMETRIC_GRID, CALIB_CB_CLUSTERING (can help sometimes)
+    params = cv2.SimpleBlobDetector_Params()
+
+    # --- Tune these parameters based on your grid, lighting, and image resolution ---
+
+    # Filter by Area.
+    params.filterByArea = True
+    # Estimate min/max area: Area = pi * (radius_pixels)^2
+    # Measure expected circle radius in pixels in typical images. Be generous.
+    params.minArea = 100  # Adjust based on your images (pixels^2)
+    params.maxArea = 70000 # Adjust based on your images (pixels^2)
+
+    # Filter by Circularity (1 is a perfect circle)
+    params.filterByCircularity = True
+    params.minCircularity = 0.6 # Allow some imperfection/perspective distortion
+
+    # Filter by Convexity (1 is perfectly convex)
+    params.filterByConvexity = True
+    params.minConvexity = 0.85
+
+    # Filter by Inertia Ratio (closer to 0 for elongated, 1 for circle)
+    params.filterByInertia = True
+    params.minInertiaRatio = 0.1 # Allow some elongation due to perspective
+
+    # Distance between blobs (tune if circles are close)
+    # params.minDistBetweenBlobs = 10 # Adjust if needed
+
+    # Thresholds (less critical if using adaptive thresholding before)
+    # params.minThreshold = 10
+    # params.maxThreshold = 200
+
+    blob_detector = cv2.SimpleBlobDetector_create(params)
+
+    # --- Process Images ---
+    # ... inside the loop ...
+    gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+
+    # --- Optional Preprocessing (as described above) ---
+    # gray_processed = ... apply adaptiveThreshold or CLAHE ...
+
+    # Find the circle grid centers using the custom detector
     flags = cv2.CALIB_CB_ASYMMETRIC_GRID # | cv2.CALIB_CB_CLUSTERING
-    ret, corners = cv2.findCirclesGrid(gray, pattern_size, flags=flags)
+    ret, corners = cv2.findCirclesGrid(
+        gray, # or gray_processed if you preprocessed
+        pattern_size,
+        flags=flags,
+        blobDetector=blob_detector # <--- Pass the custom detector!
+    )
 
     # If found, draw corners and display
     if ret:
@@ -130,9 +174,14 @@ for i, fname in enumerate(image_files):
                 print("  Invalid key. Press 'y' (accept), 'n' (reject), or 'q' (quit).")
     else:
         print("  Grid not detected.")
-        # Optionally display the image anyway for debugging
-        # cv2.imshow('Detection', img_color)
-        # cv2.waitKey(500) # Show for 0.5 seconds
+        # Display the image that failed detection for debugging
+        cv2.namedWindow('Detection Failed', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Detection Failed', 800, 600)
+        # Choose which image to show (raw gray, thresholded, CLAHE, etc.)
+        cv2.imshow('Detection Failed', gray_blur) # Or show thresh, cl1 etc.
+        print("  (Displaying image where detection failed. Press any key to continue)")
+        cv2.waitKey(0) # Wait indefinitely until a key is pressed
+        cv2.destroyWindow('Detection Failed') # Clean up the specific window
 
 cv2.destroyAllWindows()
 
