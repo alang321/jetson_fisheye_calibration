@@ -1,0 +1,11 @@
+# For image processing and video capture (MUST be built/installed WITH GStreamer support on the client)
+opencv-python
+
+# Numerical operations, often a dependency of OpenCV and used directly
+numpy
+
+# Python bindings for GObject libraries (like GStreamer, GLib)
+# Required by server.py. Needed by control.py only if using GStreamer directly via gi,
+# not strictly required if *only* using cv2.VideoCapture with GStreamer backend.
+# NOTE: Installation often requires system packages (see below).
+PyGObject
