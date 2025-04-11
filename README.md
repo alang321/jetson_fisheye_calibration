@@ -31,13 +31,12 @@
 
 1. **Run the Calibration Script**  
    Execute:
-
-   ```bash
-   python3 asymm_circle_fisheye.py --dir ./calibration_images/ --cols 11 --rows 7 --spacing 39 --visualize_serpentine
-   ```
-   or without pretty manual detection:
    ```bash
    python3 asymm_circle_fisheye.py --dir ./calibration_images/ --cols 11 --rows 7 --spacing 39
+   ```
+   or with pretty manual detection visualization:
+   ```bash
+   python3 asymm_circle_fisheye.py --dir ./calibration_images/ --cols 11 --rows 7 --spacing 39 --visualize_serpentine
    ```
 
 2. **Check Blob Detections**  
