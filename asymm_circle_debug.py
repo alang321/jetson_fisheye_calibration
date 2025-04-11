@@ -867,6 +867,35 @@ if ret:
     except Exception as e:
         print(f"Error saving data to {output_file}: {e}")
 
+    # --- Visualize Calibration Point Coverage --- <<< NEW SECTION START
+    print("\nVisualizing overall calibration point coverage...")
+    if img_shape is not None and len(imgpoints) > 0:
+        coverage_img = np.full((img_shape[0], img_shape[1], 3), 255, dtype=np.uint8) # White canvas
+        total_points_drawn = 0
+        point_color = (0, 0, 255) # Red dots
+        point_radius = 2         # Small radius
+
+        for view_corners in imgpoints: # Iterate through points from each accepted view
+            for corner in view_corners: # Iterate through each corner in the view
+                # corner shape is (1, 2)
+                center = tuple(corner[0].astype(int))
+                cv2.circle(coverage_img, center, point_radius, point_color, -1) # Filled circle
+                total_points_drawn += 1
+
+        cv2.putText(coverage_img, f"Coverage: {total_points_drawn} points from {len(imgpoints)} views",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 1, cv2.LINE_AA)
+
+        cv2.namedWindow("Calibration Point Coverage", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Calibration Point Coverage", 800, int(800 * img_shape[0] / img_shape[1])) # Maintain aspect ratio
+        cv2.imshow("Calibration Point Coverage", coverage_img)
+        print(f"  Displayed coverage map with {total_points_drawn} points.")
+        print("  Press any key in the 'Calibration Point Coverage' window to continue...")
+        cv2.waitKey(0)
+        cv2.destroyWindow("Calibration Point Coverage") # Close only this window
+    else:
+        print("  Skipping coverage visualization (no image shape or no accepted points).")
+    # --- NEW SECTION END ---
+
 
     # --- Optional: Calculate Reprojection Error Manually (for verification) ---
     print("\nCalculating reprojection errors per image...")
