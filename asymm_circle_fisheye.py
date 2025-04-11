@@ -165,7 +165,7 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
     if visualize:
         debug_walk_win = "Local Vector NN Walk"
         cv2.namedWindow(debug_walk_win, cv2.WINDOW_NORMAL); cv2.resizeWindow(debug_walk_win, 1000, 700)
-        run_mode = True
+        run_mode = False
 
     # Initialize walker state
     prev_idx = label_to_ideal_idx["Top-Left"] # Start at TL
@@ -235,6 +235,14 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
                 search_point, available_coords, available_indices, max_dist_sq
             )
 
+            if found_kp_idx == -1:
+                #go back half a step and try again
+                search_point = prev_found_pt + 0.5 * vector_pred
+
+                found_kp_idx, dist_sq = find_nearest_available(
+                    search_point, available_coords, available_indices, max_dist_sq
+                )
+
             if found_kp_idx != -1:
                 # Assign the matched point
                 found_pt = kp_coords[found_kp_idx]
@@ -266,8 +274,8 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
                 
                 # Add text and display
                 if visualize:
-                        cv2.circle(vis_step, search_point_int, search_radius, (0, 0, 255), 2)
-                        # CRITICAL: Do NOT update prev_found_pt or prev_idx if no match!
+                    cv2.circle(vis_step, search_point_int, search_radius, (0, 0, 255), 2)
+                    # CRITICAL: Do NOT update prev_found_pt or prev_idx if no match!
 
         # Add text and display
         if visualize:
@@ -806,8 +814,15 @@ print(f"\nRunning fisheye calibration with image size: {img_shape[::-1]} (width,
 
 # Prepare for fisheye calibration
 # Initialize K and D matrices (will be estimated)
-K_init = np.eye(3)
-D_init = np.zeros((4, 1)) # Fisheye model uses 4 coefficients (k1, k2, k3, k4)
+K_init =np.array([[580.37298113,  0.0,          831.95902916],
+                             [0.0,           580.60884803, 630.75029174],
+                             [0.0,           0.0,          1.0        ]])
+D_init = np.array([ 
+          0.04120878,
+          -0.0040702, 
+          0.00125488,
+          -0.00064088
+        ])
 
 # Calibration flags
 calib_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_CHECK_COND | cv2.fisheye.CALIB_FIX_SKEW
@@ -819,133 +834,257 @@ image_size_wh = (img_shape[1], img_shape[0])
 
 # Termination criteria for the optimization process
 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+import random # <-- Add this import at the top of your script
+
+# --- (Keep all the code above the Perform Calibration section the same) ---
+
+# --- Perform Calibration ---
+print(f"\nCollected {accepted_count} valid views out of {processed_count} processed images.")
+
+if accepted_count < min_images_for_calib:
+    print(f"Error: Insufficient number of valid views ({accepted_count}). Need at least {min_images_for_calib}.")
+    # ... (keep existing error message suggestions) ...
+    sys.exit(1)
+
+if img_shape is None:
+    print("Error: Could not determine image shape (no images processed successfully?).")
+    sys.exit(1)
+
+print(f"\nRunning fisheye calibration with image size: {img_shape[::-1]} (width, height)...")
+
+# Prepare for fisheye calibration
+K_init = np.eye(3)
+D_init = np.zeros((4, 1))
+calib_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_CHECK_COND | cv2.fisheye.CALIB_FIX_SKEW
+image_size_wh = (img_shape[1], img_shape[0])
+criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+
+# --- Variables to hold the final successful calibration results ---
+final_ret = None
+final_K = None
+final_D = None
+final_rvecs = None
+final_tvecs = None
+final_objpoints = objpoints # Start with all accepted points
+final_imgpoints = imgpoints
+final_filenames = processed_image_filenames
+final_accepted_count = accepted_count
+calibration_succeeded = False # Flag to track success
+
+# --- Configuration for Randomized Removal ---
+max_random_attempts = 5 # How many times to try the random removal process
+print(f"Will attempt randomized removal up to {max_random_attempts} times if initial calibration fails.")
 
 try:
-    # IMPORTANT: OpenCV expects lists of Numpy arrays for points
-    # Ensure objpoints is List[Nx3 float32], imgpoints is List[Nx1x2 float32]
-    # Our current lists should match this format.
-
+    print(f"\nAttempting initial calibration with {len(final_objpoints)} views...")
     ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
-        objpoints,      # List of (N, 3) objp arrays
-        imgpoints,      # List of (N, 1, 2) corner arrays
-        image_size_wh,  # Image size (width, height)
-        K_init,         # Initial guess for K
-        D_init,         # Initial guess for D (zeros)
+        final_objpoints,
+        final_imgpoints,
+        image_size_wh,
+        K_init,
+        D_init,
         flags=calib_flags,
         criteria=criteria
     )
+    # If successful on the first try:
+    final_ret = ret
+    final_K = K
+    final_D = D
+    final_rvecs = rvecs
+    final_tvecs = tvecs
+    calibration_succeeded = True
+    print("Initial calibration attempt successful.")
+
 except cv2.error as e:
-     print(f"\n!!! OpenCV Error during calibration: {e}")
-     print("This might be due to insufficient points, very poor detections (high initial error),")
-     print("numerical instability, or potentially incorrect object points (check grid shape and spacing).")
-     print("Ensure views have sufficient variation and accurate detections.")
-     sys.exit(1)
+    print(f"\n!!! Initial OpenCV Error during calibration: {e}")
+    # --- START: Randomized Iterative Removal Logic ---
+    if "CALIB_CHECK_COND" in str(e) and accepted_count >= min_images_for_calib:
+        print(f"\nAttempting randomized iterative removal (up to {max_random_attempts} attempts)...")
+
+        for attempt in range(max_random_attempts):
+            print(f"\n--- Random Removal Attempt {attempt + 1}/{max_random_attempts} ---")
+
+            # --- Reset state for this attempt ---
+            # Work on copies so we don't modify the original full lists *across attempts*
+            objpoints_copy = list(objpoints)
+            imgpoints_copy = list(imgpoints)
+            filenames_copy = list(processed_image_filenames)
+            current_view_count = accepted_count
+            removed_in_this_attempt = [] # Keep track of removals in this specific attempt
+
+            # --- Inner loop: Randomly remove images until success or minimum count reached ---
+            while current_view_count >= min_images_for_calib:
+                try:
+                    print(f"  Attempt {attempt+1}: Retrying calibration with {current_view_count} views...")
+                    ret_iter, K_iter, D_iter, rvecs_iter, tvecs_iter = cv2.fisheye.calibrate(
+                        objpoints_copy,
+                        imgpoints_copy,
+                        image_size_wh,
+                        K_init, # Re-use initial K guess
+                        D_init, # Re-use initial D guess
+                        flags=calib_flags,
+                        criteria=criteria
+                    )
+                    # SUCCESS!
+                    print(f"  Calibration succeeded in attempt {attempt + 1} after removing {accepted_count - current_view_count} view(s).")
+                    print(f"  Views removed in this successful attempt: {removed_in_this_attempt}")
+                    final_ret = ret_iter
+                    final_K = K_iter
+                    final_D = D_iter
+                    final_rvecs = rvecs_iter
+                    final_tvecs = tvecs_iter
+                    final_objpoints = objpoints_copy # Keep the successful subset
+                    final_imgpoints = imgpoints_copy
+                    final_filenames = filenames_copy
+                    final_accepted_count = current_view_count # Update the count
+                    calibration_succeeded = True
+                    break # Exit the inner while loop (this attempt was successful)
+
+                except cv2.error as inner_e:
+                    # Still failing, remove a RANDOM image and try again
+                    if current_view_count > min_images_for_calib:
+                        # --- Random Selection ---
+                        idx_to_remove = random.randrange(current_view_count)
+                        removed_filename = os.path.basename(filenames_copy[idx_to_remove])
+                        print(f"    Attempt {attempt+1}: Calibration failed again ({inner_e}). Randomly removing view {idx_to_remove + 1}/{current_view_count}: {removed_filename}")
+
+                        # Remove from copies using the random index
+                        objpoints_copy.pop(idx_to_remove)
+                        imgpoints_copy.pop(idx_to_remove)
+                        filenames_copy.pop(idx_to_remove)
+                        removed_in_this_attempt.append(removed_filename) # Track removal for this attempt
+                        current_view_count -= 1
+                        # Loop continues to retry calibration
+                    else:
+                        # Reached minimum images and still failed *within this attempt*
+                        print(f"    Attempt {attempt+1}: Calibration failed with minimum required views ({min_images_for_calib}). Stopping this removal path.")
+                        break # Exit the inner while loop for this attempt
+
+                except Exception as general_exception:
+                     print(f"\n!!! An unexpected error occurred during attempt {attempt+1}'s calibration: {general_exception}")
+                     import traceback
+                     traceback.print_exc()
+                     break # Stop this attempt's inner loop on unexpected errors
+
+            # --- Check if this attempt succeeded ---
+            if calibration_succeeded:
+                break # Exit the outer for loop (attempts loop) because we found a working set
+
+        # --- After all attempts ---
+        if not calibration_succeeded:
+            print(f"\nRandomized iterative removal failed after {max_random_attempts} attempts.")
+            # Optional: Keep the original error message 'e' available if needed
+            print("Original error likely persisted or occurred with minimum views across multiple random paths.")
+
+    else:
+        # Error was not CALIB_CHECK_COND or not enough images to start removing
+        print("Cannot attempt iterative removal (error not CALIB_CHECK_COND or insufficient initial views).")
+        print("Consider checking input points, view variation, or objp definition.")
+    # --- END: Randomized Iterative Removal Logic ---
+
 except Exception as e:
-     print(f"\n!!! An unexpected error occurred during calibration: {e}")
+     print(f"\n!!! An unexpected GENERAL error occurred during initial calibration: {e}")
      import traceback
      traceback.print_exc()
-     sys.exit(1)
+     # calibration_succeeded remains False
+
 
 # --- Results ---
-if ret:
+# Now, base the rest of the script on the 'calibration_succeeded' flag
+# and use the 'final_' variables which hold the results either from the
+# initial attempt or the successful randomized iterative attempt.
+
+if calibration_succeeded:
     print("\nCalibration successful!")
-    print(f"  RMS reprojection error: {ret:.4f} pixels")
+    print(f"  Used {final_accepted_count} views for final calibration.") # Report the number used
+    print(f"  RMS reprojection error: {final_ret:.4f} pixels")
     print("\nCamera Matrix (K):")
-    print(K)
+    print(final_K)
     print("\nDistortion Coefficients (D) [k1, k2, k3, k4]:")
-    print(D.flatten()) # D is usually returned as a column vector
+    print(final_D.flatten())
 
     # --- Save Results ---
     print(f"\nSaving calibration data to: {output_file}")
     try:
-        # Save K, D, image shape, RMS error, and optionally the points used
-        np.savez(output_file, K=K, D=D, img_shape=img_shape, rms=ret,
-                 objpoints=np.array(objpoints, dtype=object), # Save points if needed later
-                 imgpoints=np.array(imgpoints, dtype=object),
-                 filenames=np.array(processed_image_filenames)) # Save corresponding filenames
+        # Save the results from the SUCCESSFUL calibration
+        np.savez(output_file, K=final_K, D=final_D, img_shape=img_shape, rms=final_ret,
+                 objpoints=np.array(final_objpoints, dtype=object), # Save points ACTUALLY used
+                 imgpoints=np.array(final_imgpoints, dtype=object),
+                 filenames=np.array(final_filenames)) # Save corresponding filenames
         print("Data saved.")
     except Exception as e:
         print(f"Error saving data to {output_file}: {e}")
 
-    # --- Visualize Calibration Point Coverage --- <<< NEW SECTION START
+    # --- Visualize Calibration Point Coverage ---
+    # (Code remains the same, using final_imgpoints)
     print("\nVisualizing overall calibration point coverage...")
-    if img_shape is not None and len(imgpoints) > 0:
-        coverage_img = np.full((img_shape[0], img_shape[1], 3), 255, dtype=np.uint8) # White canvas
+    if img_shape is not None and len(final_imgpoints) > 0:
+        coverage_img = np.full((img_shape[0], img_shape[1], 3), 255, dtype=np.uint8)
         total_points_drawn = 0
-        point_color = (0, 0, 255) # Red dots
-        point_radius = 2         # Small radius
+        point_color = (0, 0, 255); point_radius = 2
 
-        for view_corners in imgpoints: # Iterate through points from each accepted view
-            for corner in view_corners: # Iterate through each corner in the view
-                # corner shape is (1, 2)
+        for view_corners in final_imgpoints: # Iterate through points from each USED view
+            for corner in view_corners:
                 center = tuple(corner[0].astype(int))
-                cv2.circle(coverage_img, center, point_radius, point_color, -1) # Filled circle
+                cv2.circle(coverage_img, center, point_radius, point_color, -1)
                 total_points_drawn += 1
 
-        cv2.putText(coverage_img, f"Coverage: {total_points_drawn} points from {len(imgpoints)} views",
+        cv2.putText(coverage_img, f"Coverage: {total_points_drawn} points from {len(final_imgpoints)} views",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 1, cv2.LINE_AA)
 
         cv2.namedWindow("Calibration Point Coverage", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Calibration Point Coverage", 800, int(800 * img_shape[0] / img_shape[1])) # Maintain aspect ratio
+        cv2.resizeWindow("Calibration Point Coverage", 800, int(800 * img_shape[0] / img_shape[1]))
         cv2.imshow("Calibration Point Coverage", coverage_img)
         print(f"  Displayed coverage map with {total_points_drawn} points.")
         print("  Press any key in the 'Calibration Point Coverage' window to continue...")
         cv2.waitKey(0)
-        cv2.destroyWindow("Calibration Point Coverage") # Close only this window
+        cv2.destroyWindow("Calibration Point Coverage")
     else:
         print("  Skipping coverage visualization (no image shape or no accepted points).")
-    # --- NEW SECTION END ---
 
 
-    # --- Optional: Calculate Reprojection Error Manually (for verification) ---
-    print("\nCalculating reprojection errors per image...")
+    # --- Optional: Calculate Reprojection Error Manually ---
+    # (Code remains the same, using final_ variables)
+    print("\nCalculating reprojection errors per image (for the successful set)...")
     total_error = 0
     per_view_errors = []
-    if len(objpoints) > 0 and len(rvecs) == len(objpoints) and len(tvecs) == len(objpoints):
-        for i in range(len(objpoints)):
+    if len(final_objpoints) > 0 and len(final_rvecs) == len(final_objpoints) and len(final_tvecs) == len(final_objpoints):
+        for i in range(len(final_objpoints)):
             try:
-                # Project object points back into image plane using calibrated parameters
-                imgpoints2, _ = cv2.fisheye.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, D)
-                # Calculate error (Euclidean distance between detected and reprojected points)
-                # Use NORM_L2 per point, then average
-                error = cv2.norm(imgpoints[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
+                imgpoints2, _ = cv2.fisheye.projectPoints(final_objpoints[i], final_rvecs[i], final_tvecs[i], final_K, final_D)
+                error = cv2.norm(final_imgpoints[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
                 per_view_errors.append(error)
                 total_error += error
-                # print(f"  Image {i+1} ({os.path.basename(processed_image_filenames[i])}): {error:.4f} pixels")
+                # Optional: Print per-view error using final_filenames
+                # print(f"  Image {i+1} ({os.path.basename(final_filenames[i])}): {error:.4f} pixels")
             except cv2.error as proj_err:
-                print(f"  Warning: Could not project points for image {i}. Error: {proj_err}")
-                per_view_errors.append(np.inf) # Indicate an error for this view
+                print(f"  Warning: Could not project points for image {i} ({os.path.basename(final_filenames[i])}). Error: {proj_err}")
+                per_view_errors.append(np.inf)
 
-        mean_error = total_error / len(objpoints)
+        mean_error = total_error / len(final_objpoints) if len(final_objpoints) > 0 else 0
         print(f"\nAverage reprojection error (calculated manually): {mean_error:.4f} pixels")
-        # You could analyze per_view_errors further to identify bad images
     else:
          print("\nSkipping manual reprojection error calculation (missing points or extrinsics).")
 
 
-    # --- Visualize Undistortion (Optional but Recommended) ---
+    # --- Visualize Undistortion ---
+    # (Code remains the same, using final_ variables)
     print("\nVisualizing undistortion on the first accepted sample image...")
-    if accepted_count > 0 and processed_image_filenames:
-        first_accepted_img_path = processed_image_filenames[0]
+    if final_accepted_count > 0 and final_filenames:
+        first_accepted_img_path = final_filenames[0] # Use the first from the FINAL successful set
         img_distorted = cv2.imread(first_accepted_img_path)
 
         if img_distorted is not None:
             h, w = img_distorted.shape[:2]
-            # Option 1: Use fisheye.undistortImage (simpler, may crop)
-            # Knew = K.copy() # Use original K, or estimate new one
-            # You might want to compute an optimal new camera matrix if you want to scale/crop less aggressively
-            balance = 0.0 # 0: crops significantly to remove black areas, 1: keeps all pixels, showing black areas
-            Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(K, D, image_size_wh, np.eye(3), balance=balance)
-            map1, map2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), Knew, image_size_wh, cv2.CV_16SC2)
+            balance = 0.0
+            # Use final K and D for undistortion
+            Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(final_K, final_D, image_size_wh, np.eye(3), balance=balance)
+            map1, map2 = cv2.fisheye.initUndistortRectifyMap(final_K, final_D, np.eye(3), Knew, image_size_wh, cv2.CV_16SC2)
             img_undistorted = cv2.remap(img_distorted, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
-            # Option 2: Direct undistortion (simpler call, behavior similar to balance=0?)
-            # img_undistorted = cv2.fisheye.undistortImage(img_distorted, K, D, Knew=K)
-
-            # Display side-by-side
             vis_compare = np.hstack((img_distorted, img_undistorted))
             cv2.namedWindow('Distorted vs Undistorted', cv2.WINDOW_NORMAL)
-            cv2.resizeWindow('Distorted vs Undistorted', 1200, 600) # Adjust size
+            cv2.resizeWindow('Distorted vs Undistorted', 1200, 600)
             cv2.imshow('Distorted vs Undistorted', vis_compare)
             print(f"Displaying undistortion result for {os.path.basename(first_accepted_img_path)}. Press any key to exit.")
             cv2.waitKey(0)
@@ -955,12 +1094,13 @@ if ret:
     else:
          print("No valid images were accepted, cannot visualize undistortion.")
 
-else:
-    print("\nCalibration failed. The optimization could not converge.")
+
+else: # calibration_succeeded is False
+    print("\nCalibration failed. The optimization could not converge, even after attempting randomized removal.")
     print("Possible reasons include:")
-    print("- Poor quality detections (high initial reprojection error).")
-    print("- Insufficient number of views or lack of variation in views.")
+    print("- Persistently poor quality detections (high initial reprojection error).")
+    print("- Insufficient number of *good* views or lack of variation even after removal.")
     print("- Incorrect grid parameters (--cols, --rows, --spacing).")
-    print("- Numerical instability (check CALIB_CHECK_COND flag was used).")
+    print("- Severe numerical instability not resolved by removing views.")
 
 print("\nCalibration process finished.")

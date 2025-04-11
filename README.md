@@ -2,6 +2,10 @@
 
 ## 1. Capturing Images
 
+1. Connect both Drone and Laptop to a fast local network.
+
+2.
+
 1. **Start the Video Stream from the Drone**  
    Copy `server.py` to the drone and run it to start streaming the camera feed.
 
