@@ -173,14 +173,34 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
 
     # Serpentine walk order
     walk_indices = []
+    row_switches = []
+    first = False
+
     for r in range(rows):
+        if r != 0: first = True
+
         if r % 2 == 0: # Even rows: left to right
-            for c in range(cols): walk_indices.append(r * cols + c)
+            for c in range(cols): 
+                if first:
+                    first = False
+                    row_switches.append(True)
+                else:
+                    row_switches.append(False)
+                walk_indices.append(r * cols + c)
         else:          # Odd rows: right to left
-            for c in range(cols - 1, -1, -1): walk_indices.append(r * cols + c)
+            for c in range(cols - 1, -1, -1): 
+                if first:
+                    first = False
+                    row_switches.append(True)
+                else:
+                    row_switches.append(False)
+
+                walk_indices.append(r * cols + c)
+
+    iteration_indicces = zip(walk_indices, row_switches)
 
 
-    for current_grid_idx in walk_indices:
+    for current_grid_idx, is_row_switch in iteration_indicces:
         # Skip if already filled (corners or already processed)
         if not np.isnan(final_corners[current_grid_idx, 0, 0]):
             # If it's a point we just successfully matched, update prev state
@@ -213,35 +233,46 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
         vector_pred = pred_pt_current_ideal - pred_pt_prev_ideal
 
         # Calculate the *search point* by applying the vector to the *last found* point
-        search_point = prev_found_pt + vector_pred
-        search_point_int = tuple(search_point.astype(int))
+        if not is_row_switch:
+            search_point1 = prev_found_pt + 0.5 * vector_pred
+            search_point_int1 = tuple(search_point1.astype(int))
+        else:
+            search_point1 = prev_found_pt + vector_pred
+            search_point_int1 = tuple(search_point1.astype(int))
+
+        search_point2 = prev_found_pt + vector_pred
+        search_point_int2 = tuple(search_point2.astype(int))
 
         # --- Draw prediction details on vis_step ---
 
         # Add text and display
         if visualize:
-            cv2.line(vis_step, tuple(prev_found_pt.astype(int)), search_point_int, (255, 255, 0), 1) # Cyan vector line
-            cv2.drawMarker(vis_step, search_point_int, (0, 0, 255), cv2.MARKER_CROSS, 12, 2) # Bold Red Cross at search point
-            cv2.circle(vis_step, search_point_int, search_radius, (255, 0, 0), 1) # Blue search circle
+            cv2.line(vis_step, tuple(prev_found_pt.astype(int)), search_point_int1, (255, 255, 0), 1) # Cyan vector line
+            cv2.drawMarker(vis_step, search_point_int1, (0, 0, 255), cv2.MARKER_CROSS, 12, 2) # Bold Red Cross at search point
+            cv2.circle(vis_step, search_point_int1, search_radius, (255, 0, 0), 1) # Blue search circle
 
-        match_status_text = f"Grid {current_grid_idx} (from {prev_idx}): Search @ ({search_point[0]:.0f}, {search_point[1]:.0f})"
+            cv2.line(vis_step, tuple(prev_found_pt.astype(int)), search_point_int2, (255, 255, 0), 1) # Cyan vector line
+            cv2.drawMarker(vis_step, search_point_int2, (0, 0, 255), cv2.MARKER_CROSS, 12, 2) # Bold Red Cross at search point
+            cv2.circle(vis_step, search_point_int2, search_radius, (255, 0, 0), 1) # Blue search circle
+
+        match_status_text = f"Grid {current_grid_idx} (from {prev_idx}): Search @ ({search_point1[0]:.0f}, {search_point1[1]:.0f})"
         matched_kp_idx = -1 # Reset
+        found_point_1 = True
 
         # --- Perform NN Search ---
         if not available_indices:
             match_status_text += " -> FAIL (No blobs left!)"
         else:
             found_kp_idx, dist_sq = find_nearest_available(
-                search_point, available_coords, available_indices, max_dist_sq
+                search_point1, available_coords, available_indices, max_dist_sq
             )
 
             if found_kp_idx == -1:
-                #go back half a step and try again
-                search_point = prev_found_pt + 0.5 * vector_pred
-
                 found_kp_idx, dist_sq = find_nearest_available(
-                    search_point, available_coords, available_indices, max_dist_sq
+                    search_point2, available_coords, available_indices, max_dist_sq
                 )
+
+                found_point_1 = False
 
             if found_kp_idx != -1:
                 # Assign the matched point
@@ -260,7 +291,11 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
                 # Add text and display
                 if visualize:
                     cv2.circle(vis_step, match_pt_int, 6, (0, 255, 255), 2) # Yellow highlight
-                    cv2.line(vis_step, search_point_int, match_pt_int, (0, 255, 0), 1) # Green line to match
+
+                    if found_point_1:
+                        cv2.line(vis_step, search_point_int1, match_pt_int, (0, 255, 0), 1) # Green line to match
+                    else:
+                        cv2.line(vis_step, search_point_int2, match_pt_int, (0, 255, 0), 1) # Green line to match
 
                 # Remove from available pool
                 idx_in_available = available_indices.index(found_kp_idx)
@@ -274,7 +309,7 @@ def run_four_corner_local_vector_walk(image_to_select_on, detected_keypoints, ob
                 
                 # Add text and display
                 if visualize:
-                    cv2.circle(vis_step, search_point_int, search_radius, (0, 0, 255), 2)
+                    cv2.circle(vis_step, search_point_int2, search_radius, (0, 0, 255), 2)
                     # CRITICAL: Do NOT update prev_found_pt or prev_idx if no match!
 
         # Add text and display
