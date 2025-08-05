@@ -5,11 +5,9 @@ import glob
 import argparse
 import sys
 from scipy.spatial import distance, KDTree # For efficient nearest neighbor searches
-from sklearn.neighbors import NearestNeighbors
 import math # For checking NaN
-from typing import List, Dict, Tuple, Optional, Any, Set
-from sklearn.cluster import DBSCAN
-from sklearn.neighbors import radius_neighbors_graph
+from typing import List, Dict, Set, Tuple, Optional
+import collections
 
 # --- Main Public Function (Controller) ---
 
@@ -50,11 +48,26 @@ def run_four_corner_local_vector_walk(
     corner_labels = ["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"]
 
     while True:
-        auto_grid = find_grid_adaptive(
+        auto_grid = find_grid_by_hexagon_symmetry(
             keypoints=detected_keypoints,
             pattern_size=(cols, rows),
             visualize=True
         )
+
+        if auto_grid is not None:
+            print("  Found an automatic grid, but you can still select corners manually.")
+            print("  Press 'y' to skip manual selection and use the automatic grid.")
+
+            tmp_img = image_to_select_on.copy()
+            cv2.drawChessboardCorners(tmp_img, pattern_size, auto_grid, True)
+
+            cv2.imshow("Automatic Grid", tmp_img)
+            key = cv2.waitKey(0) & 0xFF
+            if key == ord('y'):
+                print("  Skipping manual corner selection, using automatic grid.")
+                return auto_grid.reshape(-1, 1, 2).astype(np.float32)
+        else:
+            print("  No automatic grid found, please select corners manually.")
 
         clicked_indices = _get_four_corners_from_user(image_to_select_on, kp_coords, corner_labels)
         if not clicked_indices:
@@ -103,368 +116,639 @@ def run_four_corner_local_vector_walk(
             continue
 
         print("  Successfully matched all points.")
+
         return final_corners
     
-# _find_best_row_in_pool remains the same as the previous version.
-# The visualization for its output is handled in the main function.
-
-# This function is unchanged as it contains no visualization code.
-def _find_best_row_in_pool(
-    pool_coords: np.ndarray,
-    pool_indices: np.ndarray,
-    num_cols_expected: int,
-    nn_search_k: int = 7,
-    search_radius_factor: float = 0.6,
-    consistency_weight: float = 0.5,
-    visualize: bool = False,
-) -> Optional[np.ndarray]:
-    """
-    Searches a pool of points to find the most consistent, straightest possible row.
-
-    Args:
-        pool_coords: Coordinates of points to search within.
-        pool_indices: Original indices corresponding to pool_coords.
-        num_cols_expected: The target length of the row.
-        nn_search_k: Number of nearest neighbors to consider for starting a chain.
-        search_radius_factor: Multiplier for local spacing to define search radius.
-        consistency_weight: Weight for scoring angle vs. distance consistency.
-
-    Returns:
-        An array of original indices representing the best row found, or None.
-    """
-    if len(pool_coords) < num_cols_expected:
-        return None
-
-    kdtree = KDTree(pool_coords)
-    found_rows = []
-
-    for i, p1_coord in enumerate(pool_coords):
-        # Find k nearest neighbors to start a chain
-        distances, neighbor_indices = kdtree.query(p1_coord, k=nn_search_k)
-        
-        for j, p2_coord in zip(neighbor_indices[1:], pool_coords[neighbor_indices[1:]]):
-            # Start a new chain
-            current_chain_indices = [i, j]
-            
-            while len(current_chain_indices) < num_cols_expected:
-                # Predict the next point's position
-                p_prev_idx = current_chain_indices[-2]
-                p_curr_idx = current_chain_indices[-1]
-                
-                p_prev, p_curr = pool_coords[p_prev_idx], pool_coords[p_curr_idx]
-                
-                step_vector = p_curr - p_prev
-                predicted_coord = p_curr + step_vector
-                
-                # Search for the best match near the prediction
-                step_dist = np.linalg.norm(step_vector)
-                search_radius = step_dist * search_radius_factor
-                
-                possible_next_indices = kdtree.query_ball_point(predicted_coord, r=search_radius)
-                
-                best_next_idx = -1
-                min_dist_to_pred = float('inf')
-                
-                for next_idx in possible_next_indices:
-                    if next_idx not in current_chain_indices:
-                        dist = np.linalg.norm(pool_coords[next_idx] - predicted_coord)
-                        if dist < min_dist_to_pred:
-                            min_dist_to_pred = dist
-                            best_next_idx = next_idx
-                
-                if best_next_idx != -1:
-                    current_chain_indices.append(best_next_idx)
-                else:
-                    break # Chain broken
-            
-            if len(current_chain_indices) == num_cols_expected:
-                found_rows.append(current_chain_indices)
-
-    if not found_rows:
-        return None
-    
-
-    # Score the found rows based on consistency of angle and distance
-    best_row = None
-    min_score = float('inf')
-
-    for row_local_indices in found_rows:
-        row_coords = pool_coords[row_local_indices]
-        vectors = np.diff(row_coords, axis=0)
-        distances = np.linalg.norm(vectors, axis=1)
-        
-        # Normalize vectors to get angles
-        norm_vectors = vectors / distances[:, np.newaxis]
-        # Dot product of adjacent normalized vectors gives cosine of angle change
-        angle_cosines = np.sum(norm_vectors[:-1] * norm_vectors[1:], axis=1)
-        
-        # Score is a mix of distance variation and angle variation
-        dist_score = np.std(distances) / np.mean(distances)
-        angle_score = np.mean(1 - angle_cosines) # smaller angle change is better
-        
-        score = dist_score + angle_score * consistency_weight
-        
-        if score < min_score:
-            min_score = score
-            best_row = row_local_indices
-
-    # visualise all rows in opencv window and highlight the best row if it exists
-    if visualize:
-        cv2.namedWindow("Best Row Visualization", cv2.WINDOW_NORMAL)
-        # Create an empty canvas sized to include all pool points
-        h = int(np.max(pool_coords[:,1])) + 50
-        w = int(np.max(pool_coords[:,0])) + 50
-        vis_img = np.zeros((h, w, 3), dtype=np.uint8)
-
-        # Generate a distinct color for each candidate row using HSV hues
-        num_rows = len(found_rows)
-        row_colors = []
-        for i in range(num_rows):
-            hue = int(180.0 * i / max(1, num_rows-1))  # spread hues 0–180
-            hsv = np.uint8([[[hue, 255, 255]]])
-            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]
-            row_colors.append((int(bgr[0]), int(bgr[1]), int(bgr[2])))
-
-        # Draw each row in its unique color
-        for i, row_indices in enumerate(found_rows):
-            color = row_colors[i]
-            # draw points
-            for idx in row_indices:
-                pt = tuple(pool_coords[idx].astype(int))
-                cv2.circle(vis_img, pt, 4, color, -1)
-            # connect in sequence
-            pts = [tuple(pool_coords[idx].astype(int)) for idx in row_indices]
-            for j in range(len(pts) - 1):
-                cv2.line(vis_img, pts[j], pts[j+1], color, 1)
-
-        # Highlight the best row in red on top
-        for idx in best_row:
-            pt = tuple(pool_coords[idx].astype(int))
-            cv2.circle(vis_img, pt, 6, (0, 0, 255), 2)
-
-        cv2.imshow("Best Row Visualization", vis_img)
-        cv2.waitKey(0)
-
-    return pool_indices[best_row]
-
-
-# This function is unchanged. It uses the window created by the main controller.
-def _propagate_grid_asymmetric(
-    row0_indices: np.ndarray,
+def inspect_hexagon_scores_interactive(
     all_coords: np.ndarray,
-    kdtree_all: KDTree,
-    available_mask: np.ndarray,
+    scores: np.ndarray,
+    best_seed_idx: int,
+    kdtree: KDTree,
+    max_window_dim: int = 1200
+):
+    """
+    Creates an interactive window to inspect the hexagon symmetry of any point.
+
+    - Displays a heatmap of scores (Blue=Good, Red=Bad).
+    - Left-click a point to draw its 6-neighbor hexagon and see its score components.
+    - Right-click to clear the inspection drawing.
+    - Press 'q' to close the window and proceed.
+    """
+    print("\n--- Interactive Score Inspector ---")
+    print("  - Left-click a point to inspect its neighborhood symmetry.")
+    print("  - Right-click to clear.")
+    print("  - Press 'q' to close and continue.")
+
+    # --- State for Interaction ---
+    base_img = None
+    display_img = None
+    inspected_idx = -1  # Original index of the point being inspected
+
+    # --- Scaling Logic ---
+    max_x = np.max(all_coords[:, 0]); max_y = np.max(all_coords[:, 1])
+    scale = min(1.0, max_window_dim / max(max_x, max_y))
+
+    def _redraw():
+        """Redraws the visualization, including any inspection details."""
+        nonlocal display_img
+        display_img = base_img.copy()
+
+        if inspected_idx != -1:
+            # --- Draw the hexagon and scores for the inspected point ---
+            pt_coord = all_coords[inspected_idx]
+            
+            # Find 6 neighbors
+            try:
+                distances, indices = kdtree.query(pt_coord, k=7)
+                if len(indices) < 7: return
+            except Exception:
+                return
+
+            neighbor_indices = indices[1:]
+            neighbor_coords = all_coords[neighbor_indices]
+
+            # Draw lines from center to neighbors
+            for n_coord in neighbor_coords:
+                cv2.line(display_img, tuple((pt_coord * scale).astype(int)), tuple((n_coord * scale).astype(int)), (255, 255, 0), 1)
+
+            # Draw the hexagon outline by connecting neighbors in angular order
+            vectors = neighbor_coords - pt_coord
+            angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+            sorted_neighbor_coords = neighbor_coords[np.argsort(angles)]
+            for i in range(6):
+                p1 = sorted_neighbor_coords[i]
+                p2 = sorted_neighbor_coords[(i + 1) % 6]
+                cv2.line(display_img, tuple((p1 * scale).astype(int)), tuple((p2 * scale).astype(int)), (0, 255, 255), 2)
+
+            # Recalculate scores to display them
+            score_dist, score_angle, score_centroid = _calculate_hexagon_score(inspected_idx, all_coords, kdtree, return_components=True)
+            
+            # Display text with scores
+            text_y = int(pt_coord[1] * scale) + 20
+            cv2.putText(display_img, f"Pt {inspected_idx}", (int(pt_coord[0] * scale), text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+            cv2.putText(display_img, f" D_std: {score_dist:.3f}", (int(pt_coord[0] * scale), text_y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+            cv2.putText(display_img, f" A_std: {score_angle:.3f}", (int(pt_coord[0] * scale), text_y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+            cv2.putText(display_img, f" C_off: {score_centroid:.3f}", (int(pt_coord[0] * scale), text_y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+
+    def on_mouse(event, x, y, flags, param):
+        """Handles user clicks to select points for inspection."""
+        nonlocal inspected_idx
+        if event == cv2.EVENT_LBUTTONDOWN:
+            unscaled_click = np.array([x, y]) / scale
+            distances = np.linalg.norm(all_coords - unscaled_click, axis=1)
+            closest_idx = np.argmin(distances)
+            
+            # Check if the clicked point can be scored
+            if np.isfinite(scores[closest_idx]):
+                inspected_idx = closest_idx
+                _redraw()
+        
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            inspected_idx = -1
+            _redraw()
+
+    # --- Main Visualization Setup ---
+    vis_w = int((max_x + 50) * scale); vis_h = int((max_y + 50) * scale)
+    base_img = np.zeros((vis_h, vis_w, 3), dtype=np.uint8)
+
+    # Draw heatmap of scores
+    valid_scores = scores[np.isfinite(scores)]
+    min_s, max_s = np.min(valid_scores), np.max(valid_scores)
+    for i, pt in enumerate(all_coords):
+        score = scores[i]
+        pt_scaled = tuple((pt * scale).astype(int))
+        if np.isfinite(score):
+            norm_score = (score - min_s) / (max_s - min_s + 1e-9)
+            color_val = int(255 * (1 - norm_score))
+            color = cv2.applyColorMap(np.uint8([[color_val]]), cv2.COLORMAP_JET)[0][0].tolist()
+            cv2.circle(base_img, pt_scaled, int(5*scale), color, -1)
+
+    # Highlight the automatically chosen seed point
+    seed_coord_scaled = tuple((all_coords[best_seed_idx] * scale).astype(int))
+    cv2.circle(base_img, seed_coord_scaled, int(12*scale), (255, 255, 255), 2)
+    
+    _redraw() # Initial draw
+
+    WIN_NAME = "Interactive Score Inspector"
+    cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WIN_NAME, vis_w, vis_h)
+    cv2.setMouseCallback(WIN_NAME, on_mouse)
+    
+    while True:
+        cv2.imshow(WIN_NAME, display_img)
+        key = cv2.waitKey(20) & 0xFF
+        if key == ord('q'):
+            break
+    cv2.destroyAllWindows()
+    
+def _calculate_hexagon_score(
+    point_idx: int,
+    all_coords: np.ndarray,
+    kdtree: KDTree,
+    weights: Tuple[float, float, float] = (1.0, 0.5, 1.5),
+    return_components: bool = False
+) -> float:
+    # ... (Calculation logic is the same as before) ...
+    try:
+        distances, indices = kdtree.query(all_coords[point_idx], k=7)
+    except Exception:
+        return (float('inf'), float('inf'), float('inf')) if return_components else float('inf')
+
+    if len(indices) < 7:
+        return (float('inf'), float('inf'), float('inf')) if return_components else float('inf')
+
+    center_coord = all_coords[point_idx]
+    neighbor_indices = indices[1:]
+    neighbor_coords = all_coords[neighbor_indices]
+    neighbor_distances = distances[1:]
+    mean_dist = np.mean(neighbor_distances)
+    if mean_dist < 1e-6: return (float('inf'), float('inf'), float('inf')) if return_components else float('inf')
+    
+    score_dist = np.std(neighbor_distances) / mean_dist
+    vectors = neighbor_coords - center_coord
+    angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+    sorted_angles = np.sort(angles)
+    angle_diffs = np.diff(np.append(sorted_angles, sorted_angles[0] + 2 * np.pi))
+    score_angle = np.std(angle_diffs)
+    centroid = np.mean(neighbor_coords, axis=0)
+    score_centroid = np.linalg.norm(center_coord - centroid) / mean_dist
+    
+    if return_components:
+        return score_dist, score_angle, score_centroid
+
+    w_dist, w_angle, w_centroid = weights
+    final_score = (w_dist * score_dist + w_angle * score_angle + w_centroid * score_centroid)
+    return final_score
+
+# --- Helper 2: Propagate the Grid from a Seed Point ---
+def _propagate_from_seed_wavefront(
+    seed_idx: int,
+    all_coords: np.ndarray,
+    kdtree: KDTree,
     pattern_size: Tuple[int, int],
     visualize: bool = False,
-    vis_img_base: Optional[np.ndarray] = None
-) -> Optional[np.ndarray]:
+    max_window_dim: int = 1200
+) -> Optional[Dict[Tuple[int, int], int]]:
     """
-    Propagates a grid assuming an asymmetric (hexagonal/staggered) layout.
+    Grows the grid outwards from a seed point, with detailed step-by-step visualization.
     """
-    num_cols, num_rows = pattern_size
-    grid = np.full((num_rows, num_cols), -1, dtype=int)
-    grid[0, :] = row0_indices
-    available_mask[row0_indices] = False
-    
+    # ... (Initial setup logic: find neighbors, sort, get v_col, v_row is the same) ...
+    _, neighbor_indices = kdtree.query(all_coords[seed_idx], k=7)
+    neighbor_indices = neighbor_indices[1:]
+    seed_coord = all_coords[seed_idx]
+    vectors = all_coords[neighbor_indices] - seed_coord
+    angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+    sorted_neighbor_indices = neighbor_indices[np.argsort(angles)]
+
+    grid_map: Dict[Tuple[int, int], int] = {(0, 0): seed_idx}
+    queue = collections.deque([((0, 0), seed_idx)])
+    visited_original_indices = {seed_idx}
+
+    seed_v_row = all_coords[sorted_neighbor_indices[3]] - seed_coord # (0, 1)
+    seed_v_row_m = all_coords[sorted_neighbor_indices[0]] - seed_coord # (0, -1)
+    seed_v_col = all_coords[sorted_neighbor_indices[1]] - seed_coord # (1, 0)
+    seed_v_col_m = all_coords[sorted_neighbor_indices[4]] - seed_coord # (-1, 0)
+    seed_v_diag = all_coords[sorted_neighbor_indices[2]] - seed_coord # (1, 1)
+    seed_v_diag_m = all_coords[sorted_neighbor_indices[5]] - seed_coord # (-1, -1)
+
+    local_direction_vectors = {seed_idx: np.array([seed_v_row, seed_v_diag, seed_v_col, seed_v_row_m, seed_v_diag_m, seed_v_col_m])} # direction vectors for the seed point, last item is a boolean indicating if the vectors are already updated or a propagated guess
+    direction_vectors_index_increments = [(0, 1), (1, 1), (1, 0), (0, -1), (-1, -1), (-1, 0)] # (r,c) increments for the 6 hexagonal directions
+
+    # definition if direction vector is not yet known
+    unknown_direction_vector = np.array([np.nan, np.nan], dtype=np.float32)
+    unknown_direction_vectors = np.array([unknown_direction_vector] * 6, dtype=np.float32) # Placeholder for unknown vectors
+
+    # hexagon opposite side mapping
+    # This is used to find the opposite side of the hexagon for the parallelogram
+    opposite_side_idx_map = {0: 3, 1: 4, 2: 5, 3: 0, 4: 1, 5: 2}
+
+    # --- Visualization Setup ---
     vis_img = None
-    if visualize and vis_img_base is not None:
-        vis_img = vis_img_base.copy()
-
-    # --- Step 1: Find the second row robustly ---
-    print("\n--- Stage 2: Finding Second Row (Asymmetric) ---")
-    row1_indices = np.full(num_cols, -1, dtype=int)
-    for c in range(num_cols):
-        p0_idx = grid[0, c]
-        p0_coord = all_coords[p0_idx]
-        
-        # Find nearest neighbor not in the seed row
-        _, neighbor_indices = kdtree_all.query(p0_coord, k=5)
-        best_match = -1
-        for n_idx in neighbor_indices:
-            if available_mask[n_idx]:
-                best_match = n_idx
-                break
-        if best_match == -1:
-            print(f"  [ propagate FAIL ] Could not find a free neighbor for Row 1, Col {c+1}.")
-            return None
-        row1_indices[c] = best_match
-    
-    # Check consistency of Row 1 before accepting
-    row0_vectors = np.diff(all_coords[grid[0, :]], axis=0)
-    row1_vectors = np.diff(all_coords[row1_indices], axis=0)
-    if not np.allclose(np.linalg.norm(row0_vectors, axis=1), np.linalg.norm(row1_vectors, axis=1), rtol=0.3):
-         print("  [ propagate FAIL ] Found second row is not geometrically consistent with the first.")
-         return None
-
-    grid[1, :] = row1_indices
-    available_mask[row1_indices] = False
     if visualize:
-        for c in range(num_cols):
-            p0_coord = all_coords[grid[0, c]]
-            p1_coord = all_coords[grid[1, c]]
-            cv2.circle(vis_img, tuple(p1_coord.astype(int)), 5, (50, 255, 150), -1)
-            cv2.line(vis_img, tuple(p0_coord.astype(int)), tuple(p1_coord.astype(int)), (50, 255, 150), 1)
-        cv2.imshow("Propagation Debug", vis_img)
+        print("\n--- Stage 2: Propagating Grid (Animated) ---")
+        print("  - Controls: Press 'p' to pause/play, 'q' to skip.")
+        
+        vis_img = np.zeros((int(np.max(all_coords[:,1]))+50, int(np.max(all_coords[:,0]))+50, 3), dtype=np.uint8)
+        for pt in all_coords: cv2.circle(vis_img, tuple(pt.astype(int)), 3, (70,70,70), -1)
+        cv2.circle(vis_img, tuple(seed_coord.astype(int)), 6, (0,255,0), -1)
+
+        WIN_NAME = "Propagation Animator"
+        cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
+        h, w, _ = vis_img.shape
+        aspect_ratio = w / h
+        win_w = min(w, max_window_dim); win_h = int(win_w / aspect_ratio)
+        cv2.resizeWindow(WIN_NAME, win_w, win_h)
+
+        # draw the row and column vectors
+        cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_row).astype(int)), (255, 0, 0), 2, tipLength=0.2)
+        cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_col).astype(int)), (0, 0, 255), 2, tipLength=0.2)
+
+        #label them
+        cv2.putText(vis_img, "Row Vector", tuple((seed_coord + seed_v_row * 0.5).astype(int)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
+        cv2.putText(vis_img, "Col Vector", tuple((seed_coord + seed_v_col * 0.5).astype(int)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+
+        cv2.imshow(WIN_NAME, vis_img)
+        cv2.waitKey(0)
+        is_paused = True
+
+    # --- Main Propagation Loop ---
+    while queue:
+        (r, c), p_idx = queue.popleft()
+        p_coord = all_coords[p_idx]
+
+        if visualize:
+            # Highlight the point currently being processed
+            cv2.circle(vis_img, tuple(p_coord.astype(int)), 8, (255,100,0), 2)
+
+        # local_direction_vectors[p_idx]
+
+        for i in range(6):
+            prediction_grid_pos = (r + direction_vectors_index_increments[i][0], c + direction_vectors_index_increments[i][1])
+            prediction_vector = local_direction_vectors[p_idx][i]
+
+            if np.isnan(prediction_vector).any():
+                # see if the opposite side is already known
+                opposite_side_idx = opposite_side_idx_map[i]
+                if not np.isnan(local_direction_vectors[p_idx][opposite_side_idx]).any():
+                    prediction_vector = -local_direction_vectors[p_idx][opposite_side_idx].copy()
+                else:
+                    continue
+
+            pred_coord = p_coord + prediction_vector
+
+            search_radius = np.linalg.norm(prediction_vector) * 0.3 # Adaptive radius
+
+            if prediction_grid_pos in grid_map:
+                continue
+
+            if visualize:
+                step_vis_img = vis_img.copy()
+                cv2.circle(step_vis_img, tuple(p_coord.astype(int)), 10, (255,255,255), 4)
+                cv2.drawMarker(step_vis_img, tuple(pred_coord.astype(int)), (0,255,255), cv2.MARKER_CROSS, 12, 1)
+                cv2.circle(step_vis_img, tuple(pred_coord.astype(int)), int(search_radius), (0, 200, 200), 1)
+
+                #draw all queued points in pink
+                for (qr, qc), q_idx in queue:
+                    q_coord = all_coords[q_idx]
+                    cv2.circle(step_vis_img, tuple(q_coord.astype(int)), 10, (255,0,255), 3)
+
+                # draw all known local direction vectors for current point
+                for j in range(6):
+                    if not np.isnan(local_direction_vectors[p_idx][j]).any():
+                        target_coord = p_coord + local_direction_vectors[p_idx][j]
+                        cv2.arrowedLine(step_vis_img, tuple(p_coord.astype(int)), tuple(target_coord.astype(int)), (255,0,255), 1, tipLength=0.2)
+            
+            possible_indices = kdtree.query_ball_point(pred_coord, r=search_radius)
+            best_match, min_dist = -1, float('inf')
+            
+            for next_idx in possible_indices:
+                if next_idx not in visited_original_indices:
+                    dist = np.linalg.norm(all_coords[next_idx] - pred_coord)
+                    if dist < min_dist:
+                        min_dist, best_match = dist, next_idx
+            
+            if best_match != -1:
+                grid_map[prediction_grid_pos] = best_match
+                visited_original_indices.add(best_match)
+                queue.append((prediction_grid_pos, best_match))
+
+                if visualize:
+                    cv2.circle(vis_img, tuple(all_coords[best_match].astype(int)), 5, (0,255,0), -1)
+
+                # give an initial guess for the new point's vectors
+                local_direction_vectors[best_match] = unknown_direction_vectors.copy()
+
+                for j in range(6):
+                    grid_pos_query = (prediction_grid_pos[0] + direction_vectors_index_increments[j][0], prediction_grid_pos[1] + direction_vectors_index_increments[j][1])
+
+                    if grid_pos_query in grid_map:
+                        local_direction_vectors[best_match][j] = all_coords[grid_map[grid_pos_query]] - all_coords[best_match]
+                        local_direction_vectors[grid_map[grid_pos_query]][opposite_side_idx_map[j]] = -local_direction_vectors[best_match][j].copy()
+
+                        if visualize:
+                            cv2.line(vis_img, tuple(all_coords[best_match].astype(int)), tuple(all_coords[grid_map[grid_pos_query]].astype(int)), (255,255,255), 1)
+
+            if visualize:
+                cv2.imshow(WIN_NAME, step_vis_img)
+                delay = 1 if not is_paused else 0
+                key = cv2.waitKey(delay) & 0xFF
+                if key == ord('q'): # Quit visualization
+                    visualize = False 
+                elif key == ord('p'): # Pause/play
+                    is_paused = not is_paused
+    
+    if visualize:
+        print("  [ INFO ] Propagation finished.")
+        print ("  [ INFO ] Found grid map with {} points out of expected {}.".format(len(grid_map), pattern_size[0] * pattern_size[1]))
+
+        #draw the final grid map with grid coordinates
+        for (r, c), idx in grid_map.items():
+            pt = all_coords[idx]
+            cv2.circle(vis_img, tuple(pt.astype(int)), 5, (0, 255, 0), -1)
+            cv2.putText(vis_img, f"({r},{c})", tuple(pt.astype(int) + np.array([8, 8], dtype=int)), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1, cv2.LINE_AA)
+        
+        cv2.imshow(WIN_NAME, vis_img)   
         cv2.waitKey(0)
 
-    # --- Step 2: Determine Stagger Direction ---
-    x_offsets = all_coords[grid[1, :], 0] - all_coords[grid[0, :], 0]
-    avg_x_offset = np.mean(x_offsets)
-    step_dist_x = np.mean(np.abs(row0_vectors[:, 0]))
+        #grid_points = set(grid_map.keys())
+
+        #_draw_hex_grid(grid_points)
+
+    return grid_map
+
+def _generate_target_hex_grid(
+    width: int,
+    height: int,
+) -> Set[Tuple[int, int]]:
+    """
+    Generates a hexagonal grid of r and c coordinates within the specified width and height.
+    """
+    hex_grid = set()
+
+    for r in range(height):
+        for c in range(width):
+            # Calculate the offset for odd rows
+            offset = ((r + 1) // 2)
+            hex_grid.add((r, int(c + offset)))
+
+    return hex_grid
+
+def _draw_hex_grid(
+    grid_points: Set[Tuple[int, int]],
+) -> Optional[np.ndarray]:
+    # make a second visulisation
+    max_row = max(r for r, c in grid_points)
+    max_col = max(c for r, c in grid_points)
+    min_row = min(r for r, c in grid_points)
+    min_col = min(c for r, c in grid_points)
+
+    range_rows = max_row - min_row + 1
+    range_cols = max_col - min_col + 1
+
+    # create a grid image with cols and rows labeled
+    grid_img = np.zeros((range_rows * 10, range_cols * 10, 3), dtype=np.uint8)
+
+    #fill the grid with white
+    grid_img.fill(255)
     
-    stagger_dir = 0
-    if avg_x_offset > step_dist_x * 0.25: stagger_dir = -1  # Row 1 is shifted right, so P(r,c) depends on P(r-1, c-1)
-    elif avg_x_offset < -step_dist_x * 0.25: stagger_dir = 1 # Row 1 is shifted left, so P(r,c) depends on P(r-1, c+1)
-    print(f"  [ INFO ] Detected stagger direction: {stagger_dir}")
-    if stagger_dir == 0:
-        print("  [ propagate FAIL ] Could not determine clear stagger direction.")
+    # draw the grid lines
+    for r in range(range_rows + 1):
+        cv2.line(grid_img, (0, r * 10), (range_cols * 10, r * 10), (200, 200, 200), 1)
+
+    for c in range(range_cols + 1):
+        cv2.line(grid_img, (c * 10, 0), (c * 10, range_rows * 10), (200, 200, 200), 1)
+
+    # loop through grid_map and fill the found points with black
+    for r, c in grid_points:
+        pt_row = r - min_row
+        pt_col = c - min_col
+        
+        # draw a filled box at the grid position
+        cv2.rectangle(grid_img, (pt_col * 10 + 1, pt_row * 10 + 1),
+                    (pt_col * 10 + 9, pt_row * 10 + 9), (0, 0, 0), -1)
+
+    # draw the row and column numbers
+    for r in range(range_rows):
+        cv2.putText(grid_img, str(r + min_row), (5, r * 10 + 7), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.2, (120, 120, 120), 1, cv2.LINE_AA)
+    for c in range(range_cols):
+        cv2.putText(grid_img, str(c + min_col), (c * 10 + 10, 7), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.2, (120, 120, 120), 1, cv2.LINE_AA)
+        
+    cv2.imshow("Grid Map", grid_img)
+    cv2.waitKey(0)
+
+def rotate_hex_grid(
+    grid_points: Set[Tuple[int, int]],
+    steps: int
+) -> Set[Tuple[int, int]]:
+    """
+    Rotates a set of hexagonal grid points by a multiple of 60 degrees.
+
+    This function uses an axial coordinate system for input/output and temporarily
+    converts to a cube coordinate system for rotation, which simplifies the math.
+
+    Args:
+        grid_points: A set of tuples, where each tuple is a (q, r) axial coordinate.
+                     In our case, this will be the (r, c) keys from your grid_map.
+        steps: The number of 60-degree clockwise rotations to perform.
+               For example, steps=1 is a 60-degree rotation, steps=3 is 180 degrees.
+
+    Returns:
+        A new set of tuples representing the rotated (q, r) coordinates.
+    """
+    rotated_points = set()
+    
+    # Normalize steps to be within 0-5 range
+    steps = steps % 6
+
+    for q, r in grid_points:
+        # 1. Convert axial (q, r) to cube (x, y, z) coordinates
+        # In a cube system for a hex grid, x + y + z always equals 0.
+        x = q
+        z = r
+        y = -x - z
+
+        # 2. Perform rotation by shuffling cube coordinates
+        # A 60-degree clockwise rotation is equivalent to shifting the cube coordinates.
+        for _ in range(steps):
+            x, y, z = -z, -x, -y
+        
+        # 3. Convert back from cube to axial coordinates for the output
+        new_q = x
+        new_r = z
+        rotated_points.add((new_q, new_r))
+        
+    return rotated_points
+
+def _translate_hex_grid(
+    grid_points: Set[Tuple[int, int]],
+    translation: Tuple[int, int]
+) -> Set[Tuple[int, int]]:
+    """
+    Translates a set of hexagonal grid points by a given (r, c) offset.
+
+    Args:
+        grid_points: A set of tuples, where each tuple is a (r, c) coordinate.
+        translation: A tuple (dr, dc) representing the translation in row and column.
+
+    Returns:
+        A new set of tuples representing the translated (r, c) coordinates.
+    """
+    translated_points = set()
+    dr, dc = translation
+
+    for r, c in grid_points:
+        translated_points.add((r + dr, c + dc))
+
+    return translated_points
+
+def _is_hex_grid_covered(
+    grid_map: Set[Tuple[int, int]],
+    ideal_grid: Set[Tuple[int, int]]
+) -> Tuple[int, int, float]:
+    """
+    Calculates the coverage of the grid_map against the ideal hexagonal grid.
+
+    Args:
+        grid_map: A dictionary mapping (r, c) coordinates to original indices.
+        ideal_grid: A set of (r, c) coordinates representing the ideal hexagonal grid.
+
+    Returns:
+        A tuple containing:
+        - wether all points in the ideal grid are covered by the grid_map
+    """
+    if ideal_grid.issubset(grid_map):
+        return True
+    return False
+
+def _match_and_finalize_grid(
+    grid_map: Dict[Tuple[int, int], int],
+    all_coords: np.ndarray,
+    pattern_size: Tuple[int, int],
+    visualize: bool = False,
+    max_window_dim: int = 1200
+) -> Optional[np.ndarray]:
+    """
+    Finds the best affine transformation to map the arbitrary (r,c) coordinates
+    from the grid_map to a final, ordered (row, col) system.
+    """
+    print("\n--- Stage 3: Matching Grid with Affine Transform ---")
+    num_cols, num_rows = pattern_size
+
+    target_hex_grid = _generate_target_hex_grid(num_cols, num_rows)
+
+    hex_grid = set(grid_map.keys())
+
+    # Iterate through every point as a potential anchor for the transformation
+    r_final, c_final = -1, -1
+    rotation_steps_final = -1
+
+    for r_start, c_start in hex_grid:
+        # move hex grid so that the current point is at (0, 0)
+        temp_grid = _translate_hex_grid(
+            hex_grid,
+            (-r_start, -c_start)
+        )
+        
+        for rotation_steps in range(6):
+            rotated_grid = rotate_hex_grid(temp_grid, rotation_steps)
+
+            # Calculate the coverage of the rotated grid against the ideal hex grid
+            if _is_hex_grid_covered(rotated_grid, target_hex_grid):
+                # If the rotated grid covers the ideal grid, we can calculate the affine transform
+                r_final, c_final = r_start, c_start
+                rotation_steps_final = rotation_steps
+                break
+
+    # build the final grid with the found coordinates
+    if r_final == -1 or c_final == -1:
+        print("  [ FAIL ] No valid affine transformation found that covers the ideal grid.")
+        if visualize: cv2.destroyAllWindows()
         return None
+    
+    print(f"  [ OK ] Found affine transformation with r={r_final}, c={c_final}, rotation={rotation_steps_final} steps.")
+    
+    final_grid = []
 
-    # --- Step 3: Propagate using the Parallelogram Rule ---
-    if visualize: print("\n--- Stage 3: Propagating Full Grid (Asymmetric) ---")
+    # transform grid map with the found affine transformation
+    new_grid_map = {}
+    for (r, c) in grid_map.keys():
+        idx = grid_map[(r, c)]
+        # Translate the grid point to the new origin
+        translated_r = r - r_final
+        translated_c = c - c_final
 
-    for r in range(2, num_rows):
-        for c in range(num_cols):
-            # Check for boundary conditions for the stagger index
-            if not (0 <= c + stagger_dir < num_cols):
-                print(f"  [ propagate FAIL ] Stagger calculation out of bounds at Row {r+1}, Col {c+1}.")
-                return None
-                
-            p_ref1 = all_coords[grid[r-1, c]]
-            p_ref2 = all_coords[grid[r-1, c + stagger_dir]]
-            p_ref3 = all_coords[grid[r-2, c + stagger_dir]]
-            
-            # The vector from the previous step in the zig-zag column
-            local_vector = p_ref2 - p_ref3
-            pred_pt = p_ref1 + local_vector
-            
-            search_radius = np.linalg.norm(local_vector) * 0.7
-            
-            if visualize:
-                print(f"  > Searching for Row {r+1}, Col {c+1}/{num_cols}...")
-                step_vis_img = vis_img.copy()
-                # Draw the parallelogram
-                cv2.line(step_vis_img, tuple(p_ref3.astype(int)), tuple(p_ref2.astype(int)), (255,255,0), 2)
-                cv2.line(step_vis_img, tuple(p_ref1.astype(int)), tuple(pred_pt.astype(int)), (255,255,0), 1)
-                cv2.line(step_vis_img, tuple(p_ref2.astype(int)), tuple(pred_pt.astype(int)), (150,150,0), 1)
-                cv2.drawMarker(step_vis_img, tuple(pred_pt.astype(int)), (255,0,255), cv2.MARKER_CROSS, 12, 1)
-                cv2.circle(step_vis_img, tuple(pred_pt.astype(int)), int(search_radius), (255, 0, 255), 1)
+        x = translated_r
+        z = translated_c
+        y = -x - z
 
-            possible_indices = kdtree_all.query_ball_point(pred_pt, r=search_radius)
-            best_match, min_dist = -1, float('inf')
-            for p_idx in possible_indices:
-                if available_mask[p_idx]:
-                    d = np.linalg.norm(all_coords[p_idx] - pred_pt)
-                    if d < min_dist:
-                        min_dist, best_match = d, p_idx
+        # 2. Perform rotation by shuffling cube coordinates
+        # A 60-degree clockwise rotation is equivalent to shifting the cube coordinates.
+        for _ in range(rotation_steps_final):
+            x, y, z = -z, -x, -y
+        
+        # 3. Convert back from cube to axial coordinates for the output
+        new_r = x
+        new_c = z
+        new_grid_map[(new_r, new_c)] = idx
 
-            if best_match == -1:
-                print(f"  [ propagate FAIL ] Could not find match for Row {r+1}, Col {c+1}.")
-                if visualize:
-                    cv2.circle(step_vis_img, tuple(pred_pt.astype(int)), int(search_radius), (0, 0, 255), 2)
-                    cv2.imshow("Propagation Debug", step_vis_img)
-                    cv2.waitKey(0)
+    for i in range(num_rows):
+        for j in range(num_cols):
+            r = num_rows - 1 - i  # Reverse the row order
+            offset = ((r + 1) // 2)
+            c = j + offset
+
+            if (r, c) in new_grid_map:
+                idx = new_grid_map[(r, c)]
+                final_grid.append(all_coords[idx])
+            else:
+                # If a point is missing, fill with NaN
+                print(f"  [ WARN ] Missing point at ({r}, {c}).")
                 return None
             
-            grid[r, c] = best_match
-            available_mask[best_match] = False
-            if visualize:
-                match_coord = all_coords[best_match]
-                cv2.circle(vis_img, tuple(match_coord.astype(int)), 5, (50, 255, 150), -1)
-                cv2.line(vis_img, tuple(p_ref1.astype(int)), tuple(match_coord.astype(int)), (50, 255, 150), 1)
-                cv2.imshow("Propagation Debug", vis_img)
-                cv2.waitKey(50)
-            
-    return all_coords[grid].reshape(num_rows * num_cols, 1, 2)
+    final_grid = np.array(final_grid, dtype=np.float32)
 
-# --- Main Controller Function (Modified) ---
-def find_grid_adaptive(
+    return final_grid
+
+def find_grid_by_hexagon_symmetry(
     keypoints: List[cv2.KeyPoint],
     pattern_size: Tuple[int, int],
     visualize: bool = False
 ) -> Optional[np.ndarray]:
     """
-    (Docstring is the same as before)
+    (Docstring updated to mention wavefront propagation)
     """
+    # ... (Scoring and seed finding is exactly the same as before) ...
     num_cols, num_rows = pattern_size
-    min_points = max(20, num_cols * num_rows // 2)
-    if len(keypoints) < min_points:
-        return None
-
+    if len(keypoints) < num_cols * num_rows * 0.5: return None
     all_coords = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+    kdtree = KDTree(all_coords)
 
-    # ... (DBSCAN pre-filtering logic is unchanged) ...
-    from sklearn.neighbors import NearestNeighbors
-    nn = NearestNeighbors(n_neighbors=4).fit(all_coords)
-    distances, _ = nn.kneighbors(all_coords)
-    median_dist = np.median(distances[:, -1])
-    eps = median_dist * 2.0
-    db = DBSCAN(eps=eps, min_samples=5).fit(all_coords)
-    labels = db.labels_
-    unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)
-    if len(counts) == 0: return None
-    main_cluster_label = unique_labels[np.argmax(counts)]
-    pool_mask = (labels == main_cluster_label)
-    pool_indices = np.where(pool_mask)[0]
-    pool_coords = all_coords[pool_indices]
-
-    # Step 1: Find the first, most confident row
-    print("--- Stage 1: Finding Seed Row ---")
-    # Note: _find_best_row_in_pool is unchanged from the previous version
-    row0_indices = _find_best_row_in_pool(pool_coords, pool_indices, num_cols, visualize=visualize)
+    print("--- Stage 1: Scoring all points for neighborhood symmetry ---")
+    scores = np.array([_calculate_hexagon_score(i, all_coords, kdtree) for i in range(len(all_coords))])
     
-    if row0_indices is None:
-        print("  [ FAIL ] Could not find a confident seed row.")
-        return None
-    print(f"  [ OK ] Found seed row with {len(row0_indices)} points.")
+    valid_scores = scores[np.isfinite(scores)]
+    if len(valid_scores) == 0: return None
 
-    # --- Setup for Visualization ---
-    vis_img_base = None
+    best_seed_idx = np.argmin(scores)
+    min_score = scores[best_seed_idx]
+    
     if visualize:
-        # MODIFICATION: Create a named, resizable window before first use.
-        cv2.namedWindow("Propagation Debug", cv2.WINDOW_NORMAL)
-        
-        vis_img_base = np.zeros((int(np.max(all_coords[:,1]))+50, int(np.max(all_coords[:,0]))+50, 3), dtype=np.uint8)
-        # Draw all points faintly
-        for pt in all_coords: cv2.circle(vis_img_base, tuple(pt.astype(int)), 3, (70,70,70), -1)
-        # Draw the candidate pool points
-        for pt in pool_coords: cv2.circle(vis_img_base, tuple(pt.astype(int)), 4, (150,100,0), -1)
-        # Highlight the found seed row
-        for idx in row0_indices:
-            pt = all_coords[idx]
-            cv2.circle(vis_img_base, tuple(pt.astype(int)), 6, (0,200,0), 2)
-        # Connect seed row points
-        for i in range(len(row0_indices) - 1):
-            pt1 = all_coords[row0_indices[i]]
-            pt2 = all_coords[row0_indices[i+1]]
-            cv2.line(vis_img_base, tuple(pt1.astype(int)), tuple(pt2.astype(int)), (0,255,0), 1)
-        cv2.imshow("Propagation Debug", vis_img_base)
-        cv2.waitKey(0)
+        # The interactive inspector is still very useful for checking the seed
+        inspect_hexagon_scores_interactive(all_coords, scores, best_seed_idx, kdtree)
 
-    # Step 2 & 3: Propagate grid from the seed row
-    kdtree_all = KDTree(all_coords)
-    available_mask = np.ones(len(all_coords), dtype=bool)
+    score_threshold = 2.0 
+    if min_score > score_threshold:
+        print(f"  [ FAIL ] Best score ({min_score:.2f}) is above threshold.")
+        return None
     
-    # Try propagating from the row as found
-    final_grid = _propagate_grid_asymmetric(row0_indices, all_coords, kdtree_all, available_mask.copy(), pattern_size, visualize, vis_img_base)
-    
-    # If that fails, try propagating from the reversed row
-    if final_grid is None:
-        print("\nPropagation failed, trying reversed seed row...")
-        final_grid = _propagate_grid_asymmetric(row0_indices[::-1], all_coords, kdtree_all, available_mask.copy(), pattern_size, visualize, vis_img_base)
-        
-    # ... (Rest of the function for handling failure/success and final visualization is the same) ...
-    # ...
-    if final_grid is None:
-        print("\nGrid propagation failed in both directions.")
+    print(f"  [ OK ] Found seed point {best_seed_idx} with score {min_score:.3f}.")
+
+    # --- Step 3: Propagate using the new WAVEFRONT method ---
+    print("\n--- Stage 2: Propagating grid from the seed point using wavefront method ---")
+    grid_map = _propagate_from_seed_wavefront(best_seed_idx, all_coords, kdtree, pattern_size, visualize)
+
+    if grid_map is None:
+        print("  [ FAIL ] Grid propagation from seed point failed.")
         if visualize: cv2.destroyAllWindows()
         return None
 
-    print("\nSuccessfully propagated the full grid.")
-    # (final visualization logic)
+    # --- NEW: Call the matching and finalization function ---
+    final_grid = _match_and_finalize_grid(grid_map, all_coords, pattern_size, visualize)
+    
+    if final_grid is None:
+        print("  [ FAIL ] Could not match the found points to the ideal grid pattern.")
+        if visualize: cv2.destroyAllWindows()
+        return None
+
+    print("\nSuccessfully found and ordered the final grid.")
+    if visualize: cv2.destroyAllWindows()
+
     return final_grid
-
-
 
 def _get_four_corners_from_user(
     image: np.ndarray,
