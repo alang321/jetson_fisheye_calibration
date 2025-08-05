@@ -4,803 +4,405 @@ import os
 import glob
 import argparse
 import sys
+import random
+import collections
+from typing import Optional, List, Tuple, Dict, Any
+
+# Assuming your custom finder functions are in these files/modules
 from asymm_circle_grid_pattern_finders.auto_asymm_circle_grid_finder import auto_asymm_cricle_hexagon_matching
 from asymm_circle_grid_pattern_finders.assisted_asymm_circle_grid_finder import outer_corner_assisted_local_vector_walk
 
-# --- Configuration ---
+# --- Configuration Constants ---
 DEFAULT_IMAGE_DIR = './calibration_images/'
 DEFAULT_GRID_COLS = 4
 DEFAULT_GRID_ROWS = 11
 DEFAULT_SPACING_MM = 39.0
 DEFAULT_OUTPUT_FILE = 'fisheye_calibration_data.npz'
+MIN_IMAGES_FOR_CALIB = 10
+class InteractiveTuner:
+    """A class to encapsulate the state and logic for the interactive debug GUI."""
+    def __init__(self, initial_params: cv2.SimpleBlobDetector_Params):
+        self.params = initial_params
+        self.min_area = initial_params.minArea
+        self.max_area = initial_params.maxArea
+        self.manual_thresh = 127
+        self.preprocess_mode = 0  # 0: CLAHE, 1: Raw Gray, 2: Manual, 3: Adaptive
+        self.thresh_type = cv2.THRESH_BINARY
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-# --- Argument Parsing ---
-parser = argparse.ArgumentParser(description='Fisheye Camera Calibration using Asymmetric Circle Grid.')
-parser.add_argument('--dir', type=str, default=DEFAULT_IMAGE_DIR,
-                    help=f'Directory containing calibration images (default: {DEFAULT_IMAGE_DIR})')
-parser.add_argument('--cols', type=int, default=DEFAULT_GRID_COLS,
-                    help=f'Number of circles horizontally in the grid (default: {DEFAULT_GRID_COLS})')
-parser.add_argument('--rows', type=int, default=DEFAULT_GRID_ROWS,
-                    help=f'Number of circles vertically in the grid (default: {DEFAULT_GRID_ROWS})')
-parser.add_argument('--spacing', type=float, default=DEFAULT_SPACING_MM,
-                    help=f'Distance between adjacent circle centers in real-world units (e.g., mm) (default: {DEFAULT_SPACING_MM})')
-parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT_FILE,
-                    help=f'Output file path for calibration data (.npz) (default: {DEFAULT_OUTPUT_FILE})')
-parser.add_argument('--ext', type=str, nargs='+', default=['jpg', 'png', 'bmp', 'tif', 'jpeg'],
-                    help='Image file extensions to process (default: jpg png bmp tif jpeg)')
-parser.add_argument('--visualize_serpentine', action='store_true',
-                    help='Visualize serpentine grid detection.')
-parser.add_argument('--visualize_hex_grid', action='store_true',
-                    help='Visualize hexagonal auto grid detection.')
+    def _callback_min_area(self, val): self.min_area = max(1, val)
+    def _callback_max_area(self, val): self.max_area = val
+    def _callback_thresh(self, val): self.manual_thresh = val
 
-args = parser.parse_args()
+    def setup_windows(self):
+        cv2.namedWindow('Debug View', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Debug View', 1200, 400)
+        cv2.namedWindow('Controls', cv2.WINDOW_NORMAL)
+        cv2.resizeWindow('Controls', 400, 200)
 
-# --- Setup ---
-image_dir = args.dir
-grid_cols = args.cols
-grid_rows = args.rows
-spacing = args.spacing
-output_file = args.output
-image_extensions = args.ext
+        # --- FIX IS HERE: Cast self.min_area and self.max_area to int() ---
+        cv2.createTrackbar('Manual Thresh', 'Controls', self.manual_thresh, 255, self._callback_thresh)
+        cv2.createTrackbar('Min Area', 'Controls', int(self.min_area), 5000, self._callback_min_area)
+        cv2.createTrackbar('Max Area', 'Controls', int(self.max_area), 20000, self._callback_max_area)
+        # --- END FIX ---
 
-pattern_size = (grid_cols, grid_rows) # OpenCV format: (cols, rows)
-min_images_for_calib = 10 # Minimum number of good views required
+    def get_processed_image(self, gray_img: np.ndarray) -> Tuple[np.ndarray, str]:
+        """Applies the currently selected preprocessing filter."""
+        mode_map = {0: "CLAHE", 1: "Raw Gray", 2: "Manual Thr", 3: "Adaptive Thr"}
+        if self.preprocess_mode == 0:
+            return self.clahe.apply(gray_img), mode_map[0]
+        if self.preprocess_mode == 1:
+            return gray_img, mode_map[1]
+        if self.preprocess_mode == 2:
+            _, processed = cv2.threshold(gray_img, self.manual_thresh, 255, self.thresh_type)
+            return processed, f"{mode_map[2]} ({self.manual_thresh})"
+        if self.preprocess_mode == 3:
+            block_size = 11 + 2 * (self.manual_thresh // 32); block_size = max(3, block_size | 1)
+            processed = cv2.adaptiveThreshold(gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, self.thresh_type, block_size, 2)
+            return processed, f"{mode_map[3]} (Block: {block_size})"
+        return gray_img, "Unknown"
 
-# --- Prepare Object Points ---
-# Create the 3D coordinates of the grid points in real-world space (e.g., mm)
-# Z=0 because the grid is planar.
-# The order must match the order circle centers are detected by findCirclesGrid.
-# THIS SECTION IS MODIFIED to match the generator script's logic.
+    def run_debug_loop(self, color_img: np.ndarray, gray_img: np.ndarray) -> Tuple[Optional[np.ndarray], cv2.SimpleBlobDetector]:
+        """Runs the interactive tuning loop for a single image."""
+        h, w = color_img.shape[:2]
+        vis_h = 350
+        vis_w = int(w * vis_h / h) if h > 0 else 0
+        
+        while True:
+            processed_gray, desc = self.get_processed_image(gray_img)
+            
+            # Update blob detector params
+            self.params.minArea = self.min_area
+            self.params.maxArea = max(self.min_area + 1, self.max_area)
+            detector = cv2.SimpleBlobDetector_create(self.params)
+            keypoints = detector.detect(processed_gray)
+            
+            # Create visualizations
+            vis_orig = cv2.resize(color_img, (vis_w, vis_h))
+            vis_proc = cv2.resize(cv2.cvtColor(processed_gray, cv2.COLOR_GRAY2BGR), (vis_w, vis_h))
+            
+            # Scale keypoints for visualization on the resized image
+            scaled_keypoints = [cv2.KeyPoint(kp.pt[0]*vis_w/w, kp.pt[1]*vis_h/h, kp.size*vis_w/w) for kp in keypoints]
+            
+            vis_blobs = cv2.drawKeypoints(vis_orig.copy(), scaled_keypoints, np.array([]), (0,0,255), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+            
+            cv2.putText(vis_blobs, f'Blobs: {len(keypoints)}', (10, vis_h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
+            cv2.putText(vis_proc, desc, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+            
+            debug_vis = np.hstack((vis_orig, vis_proc, vis_blobs))
+            cv2.imshow('Debug View', debug_vis)
+            
+            key = cv2.waitKey(20) & 0xFF
+            if key == ord('q'): sys.exit(0)
+            if key == ord('s'): return None, detector
+            if key == ord(' '): return processed_gray, detector
+            if key == ord('m'): self.preprocess_mode = (self.preprocess_mode + 1) % 4
+            if key == ord('t'): self.thresh_type = cv2.THRESH_BINARY if self.thresh_type == cv2.THRESH_BINARY_INV else cv2.THRESH_BINARY
 
-print(f"\nGenerating object points for {pattern_size} grid with spacing={spacing} mm...")
-objp = np.zeros((grid_cols * grid_rows, 3), np.float32)
+def parse_arguments() -> argparse.Namespace:
+    """Sets up and parses command-line arguments."""
+    parser = argparse.ArgumentParser(description='Fisheye Camera Calibration using Asymmetric Circle Grid.')
+    parser.add_argument('--dir', type=str, default=DEFAULT_IMAGE_DIR, help=f'Directory with calibration images (default: {DEFAULT_IMAGE_DIR})')
+    parser.add_argument('--cols', type=int, default=DEFAULT_GRID_COLS, help=f'Number of circles horizontally (default: {DEFAULT_GRID_COLS})')
+    parser.add_argument('--rows', type=int, default=DEFAULT_GRID_ROWS, help=f'Number of circles vertically (default: {DEFAULT_GRID_ROWS})')
+    parser.add_argument('--spacing', type=float, default=DEFAULT_SPACING_MM, help=f'Distance between circle centers in mm (default: {DEFAULT_SPACING_MM})')
+    parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT_FILE, help=f'Output file for calibration data (.npz) (default: {DEFAULT_OUTPUT_FILE})')
+    parser.add_argument('--ext', type=str, nargs='+', default=['jpg', 'png'], help='Image file extensions (default: jpg png)')
+    parser.add_argument('--no_confirm', action='store_true', dest='no_confirm', help='Do not ask for confirmation before accepting detected grids.')
+    parser.add_argument('--no_manual_backup', action='store_true', dest='no_manual_backup', help='Do not save a backup of the original images.')
+    parser.add_argument('--debug', action='store_true', help='Run in interactive debug mode to tune blob detector parameters.')
+    parser.add_argument('--visualize_serpentine', action='store_true', help='Visualize serpentine grid detection.')
+    parser.add_argument('--visualize_hex_grid', action='store_true', help='Visualize hexagonal auto grid detection.')
+    return parser.parse_args()
 
-# Use the real-world spacing value provided via the --spacing argument
-real_world_spacing = spacing # Alias for clarity
+def report_and_visualize_results(
+    calib_data: Dict[str, Any],
+    img_shape: Tuple[int, int],
+    max_window_dim: int = 1200
+):
+    """
+    Prints final calibration results and shows coverage and undistortion visualizations.
 
-for r in range(grid_rows):
-    for c in range(grid_cols):
-        idx = r * grid_cols + c
+    Args:
+        calib_data: The dictionary returned by a successful calibration run.
+        img_shape: The (height, width) of the calibration images.
+        max_window_dim: The maximum dimension for visualization windows.
+    """
+    K = calib_data['K']
+    D = calib_data['D']
+    rms = calib_data['ret']
+    imgpoints = calib_data['imgpoints']
+    filenames = calib_data['filenames']
+    
+    # --- 1. Print Numerical Results ---
+    print("\n" + "="*40)
+    print("      Calibration Successful!")
+    print("="*40)
+    print(f"  Used {len(imgpoints)} views for final calibration.")
+    print(f"  RMS reprojection error: {rms:.4f} pixels")
+    print("\nCamera Matrix (K):")
+    print(K)
+    print("\nDistortion Coefficients (D) [k1, k2, k3, k4]:")
+    print(D.flatten())
+    print("="*40 + "\n")
 
-        # --- NEW objp Calculation ---
-        # Matches the logic from generate_asymmetric_circles_grid.py
-        # Origin (0,0,0) is the center of the circle at r=0, c=0.
+    # --- 2. Visualize Calibration Point Coverage ---
+    print("Visualizing overall calibration point coverage...")
+    coverage_img = np.full((img_shape[0], img_shape[1], 3), 255, dtype=np.uint8)
+    total_points = sum(len(view) for view in imgpoints)
+    
+    for view_corners in imgpoints:
+        for corner in view_corners:
+            center = tuple(corner[0].astype(int))
+            cv2.circle(coverage_img, center, 3, (255, 0, 0), -1)
 
-        # Y coordinate increases linearly by row
-        objp[idx, 1] = r * real_world_spacing
+    cv2.putText(coverage_img, f"Coverage: {total_points} points from {len(imgpoints)} views",
+                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
 
-        # X coordinate increases linearly by column, with a half-spacing offset for odd rows
-        row_offset = (r % 2) * (real_world_spacing / 2.0)
-        objp[idx, 0] = c * real_world_spacing + row_offset
-
-        # Z coordinate is always 0 for a planar target
-        objp[idx, 2] = 0
-        # --- End NEW objp Calculation ---
-
-# draw
-# Check if objp was actually populated
-if objp.shape[0] > 0:
-    # Find the bounds of the points to determine canvas size
-    min_x = np.min(objp[:, 0])
-    max_x = np.max(objp[:, 0])
-    min_y = np.min(objp[:, 1])
-    max_y = np.max(objp[:, 1])
-
-    # Add a margin for visualization
-    vis_margin = 50 # Pixels margin around the pattern
-    point_radius = 5 # Radius of points to draw in visualization
-
-    # Calculate canvas dimensions (using ceiling to ensure points fit)
-    canvas_width = int(np.ceil(max_x - min_x)) + 2 * vis_margin
-    canvas_height = int(np.ceil(max_y - min_y)) + 2 * vis_margin
-
-    # Create a white canvas (BGR format for colored points)
-    vis_image = np.full((canvas_height, canvas_width, 3), 255, dtype=np.uint8)
-
-    print(f"  Visualization canvas size: {canvas_width}x{canvas_height}")
-    print(f"  Object point range: X [{min_x:.2f}, {max_x:.2f}], Y [{min_y:.2f}, {max_y:.2f}]")
-
-    # Draw each point onto the canvas
-    for i in range(objp.shape[0]):
-        # Get the original x, y coords
-        x_orig = objp[i, 0]
-        y_orig = objp[i, 1]
-
-        # Translate coordinates so min_x, min_y maps near the top-left margin
-        x_vis = int(round(x_orig - min_x + vis_margin))
-        y_vis = int(round(y_orig - min_y + vis_margin))
-
-        # Draw a blue circle at the translated coordinate
-        cv2.circle(vis_image, (x_vis, y_vis), point_radius, (255, 0, 0), -1) # Blue circle, filled
-
-        # Optional: Draw index number near the point
-        # cv2.putText(vis_image, str(i), (x_vis + point_radius, y_vis + point_radius),
-        #             cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
-
-    # draw dimensions
-    # Draw lines to indicate the grid spacing dimensions on the canvas
-
-    # Calculate the start point (corresponding to the origin of objp)
-    origin = (int(round(vis_margin)), int(round(vis_margin)))
-
-    # Horizontal measurement: from the first point to where the next point should be in x-direction
-    pt_horizontal = (int(round(real_world_spacing + vis_margin)), int(round(vis_margin)))
-    cv2.line(vis_image, origin, pt_horizontal, (0, 0, 0), 2)
-    # Label the horizontal spacing
-    mid_horizontal = ((origin[0] + pt_horizontal[0]) // 2, origin[1] - 10)
-    cv2.putText(vis_image, f"{real_world_spacing} mm", mid_horizontal, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
-
-    # Vertical measurement: from the first point to where the next point should be in y-direction
-    pt_vertical = (int(round(vis_margin)), int(round(real_world_spacing + vis_margin)))
-    cv2.line(vis_image, origin, pt_vertical, (0, 0, 0), 2)
-    # Label the vertical spacing
-    mid_vertical = (origin[0] + 20, (origin[1] + pt_vertical[1]) // 2)
-    cv2.putText(vis_image, f"{real_world_spacing} mm", mid_vertical, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
-
-    # Display the visualization
-    cv2.imshow("Object Point Layout (Calculated)", vis_image)
-    print("-> Displaying calculated object point layout. Press any key in the window to continue...")
+    WIN_NAME_COVERAGE = "Calibration Point Coverage"
+    cv2.namedWindow(WIN_NAME_COVERAGE, cv2.WINDOW_NORMAL)
+    h, w = img_shape
+    aspect_ratio = w / h
+    win_w = min(w, max_window_dim); win_h = int(win_w / aspect_ratio)
+    cv2.resizeWindow(WIN_NAME_COVERAGE, win_w, win_h)
+    cv2.imshow(WIN_NAME_COVERAGE, coverage_img)
+    print("-> Displaying coverage map. Press any key to continue...")
     cv2.waitKey(0)
-    cv2.destroyWindow("Object Point Layout (Calculated)") # Close only this window
-else:
-    print("  Warning: objp array is empty, cannot visualize layout.")
+
+    # --- 3. Visualize Undistortion ---
+    print("\nVisualizing undistortion on the first accepted sample image...")
+    if not filenames:
+        print("  No filenames recorded, cannot show undistortion.")
+        return
+
+    sample_img_path = filenames[0]
+    img_distorted = cv2.imread(sample_img_path)
+
+    if img_distorted is None:
+        print(f"  Warning: Could not reload sample image {sample_img_path}")
+        return
+
+    h, w = img_distorted.shape[:2]
+    image_size_wh = (w, h)
+    
+    # Generate the undistortion map
+    # Using balance=0.0 shows all source pixels (with black borders)
+    Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(K, D, image_size_wh, np.eye(3), balance=0.0)
+    map1, map2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), Knew, image_size_wh, cv2.CV_16SC2)
+    img_undistorted = cv2.remap(img_distorted, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    
+    # Create a side-by-side comparison
+    vis_compare = np.hstack((img_distorted, img_undistorted))
+
+    WIN_NAME_UNDISTORT = 'Distorted vs Undistorted'
+    cv2.namedWindow(WIN_NAME_UNDISTORT, cv2.WINDOW_NORMAL)
+    # Make the window wide enough for two images
+    h_vis, w_vis = vis_compare.shape[:2]
+    aspect_ratio = w_vis / h_vis
+    win_w = min(w_vis, max_window_dim * 2)
+    win_h = int(win_w / aspect_ratio)
+    cv2.resizeWindow(WIN_NAME_UNDISTORT, win_w, win_h)
+    
+    cv2.imshow(WIN_NAME_UNDISTORT, vis_compare)
+    print(f"-> Displaying undistortion result for {os.path.basename(sample_img_path)}. Press any key to exit.")
+    cv2.waitKey(0)
 
 
-# Arrays to store object points and image points from all accepted images
-objpoints = [] # 3d points in real world space
-imgpoints = [] # 2d points in image plane
 
-# --- Find Image Files ---
-image_files = []
-for ext in image_extensions:
-    # Ensure case-insensitivity if needed, though glob might handle it on some OS
-    search_path_lower = os.path.join(image_dir, f'*.{ext.lower()}')
-    search_path_upper = os.path.join(image_dir, f'*.{ext.upper()}')
-    found_files = glob.glob(search_path_lower) + glob.glob(search_path_upper)
-    # Remove duplicates if both upper and lower case found
-    found_files = list(set(found_files))
-    print(f"Searching: {os.path.join(image_dir, f'*.{ext}')}, Found: {len(found_files)} files")
-    image_files.extend(found_files)
+def generate_object_points(pattern_size: Tuple[int, int], spacing: float) -> np.ndarray:
+    """Generates the 3D real-world coordinates for the asymmetric grid."""
+    cols, rows = pattern_size
+    objp = np.zeros((cols * rows, 3), np.float32)
+    for r in range(rows):
+        for c in range(cols):
+            idx = r * cols + c
+            row_offset = (r % 2) * (spacing / 2.0)
+            objp[idx, 0] = c * spacing + row_offset
+            objp[idx, 1] = r * spacing
+    return objp
 
-image_files = sorted(list(set(image_files))) # Ensure unique and sorted list
+def find_image_files(directory: str, extensions: List[str]) -> List[str]:
+    """Finds all image files in a directory with the given extensions."""
+    files = []
+    for ext in extensions:
+        files.extend(glob.glob(os.path.join(directory, f'*.{ext.lower()}')))
+        files.extend(glob.glob(os.path.join(directory, f'*.{ext.upper()}')))
+    if not files:
+        print(f"Error: No images found in '{directory}' with extensions {extensions}")
+        sys.exit(1)
+    return sorted(list(set(files)))
 
-if not image_files:
-    print(f"Error: No images found in directory '{image_dir}' with extensions {image_extensions}")
-    sys.exit(1)
-
-print(f"\nFound {len(image_files)} potential calibration images.")
-
-# --- Initialize Blob Detector ---
-params = cv2.SimpleBlobDetector_Params()
-
-# --- Initial Parameter Values (will be overridden by sliders in debug mode) ---
-initial_min_area = 50     # Default starting value
-initial_max_area = 10000  # Default starting value (adjust max range on slider if needed)
-max_area_slider_limit = 20000 # Upper limit for the Max Area slider
-
-# --- Tune these parameters as needed ---
-params.filterByArea = True
-params.minArea = initial_min_area
-params.maxArea = initial_max_area
-
-params.filterByCircularity = True
-params.minCircularity = 0.5 # Lower for fisheye/perspective distortion
-
-params.filterByConvexity = True
-params.minConvexity = 0.80
-
-params.filterByInertia = True
-params.minInertiaRatio = 0.1 # Lower allows more elongation
-
-# --- Create detector - its parameters might be updated in the loop if debugging ---
-blob_detector = cv2.SimpleBlobDetector_create(params)
-
-print("\nInitial Blob Detector parameters (can be tuned in debug mode):")
-print(f"  Filter by Area: {params.filterByArea} ({params.minArea} - {params.maxArea})")
-print(f"  Filter by Circularity: {params.filterByCircularity} (> {params.minCircularity})")
-print(f"  Filter by Convexity: {params.filterByConvexity} (> {params.minConvexity})")
-print(f"  Filter by Inertia: {params.filterByInertia} (> {params.minInertiaRatio})")
-
-
-# --- Globals for Trackbars ---
-current_min_area = initial_min_area
-current_max_area = initial_max_area
-manual_thresh_value = 127 # Default starting value for manual threshold slider
-
-# --- Trackbar Callbacks (for Debug Mode) ---
-def set_min_area(val):
-    global current_min_area
-    # Ensure min area is at least 1 and less than max area
-    current_min_area = max(1, val)
-    # Optional: Also ensure min < max here if needed, although the detector handles it
-    # current_min_area = min(current_min_area, current_max_area - 1)
-
-def set_max_area(val):
-    global current_max_area
-    # Ensure max area is greater than min area
-    current_max_area = max(val, current_min_area + 1)
-
-def set_thresh(val):
-    global manual_thresh_value
-    manual_thresh_value = val
-
-# --- Process Images ---
-img_shape = None # Store image shape (height, width)
-
-print("\nProcessing images...")
-print("Press 'y' to accept detection, 'n' to reject, 'q' to quit during final view.")
-
-print("Debug View Controls:")
-print("  'm': Switch Preprocessing (CLAHE -> None -> Manual -> Adaptive)")
-print("  't': Toggle Threshold Type (Binary / Binary Inv) for Manual/Adaptive")
-print("  ' ' (Space): Process this image with current settings & try findCirclesGrid")
-print("  's': Skip this image")
-print("  'q': Quit application")
-print("  Use sliders in 'Controls' window to adjust thresholds and blob area.")
-print("\nFinal Confirmation View Controls (after finding grid in Debug mode):")
-print("  'y': Accept detection for calibration")
-print("  'n': Reject detection")
-print("  'q': Quit application")
-
-# Create windows for debug mode
-cv2.namedWindow('Debug View', cv2.WINDOW_NORMAL)
-cv2.resizeWindow('Debug View', 1200, 400) # Adjust size (W, H) - assuming 3 horizontal panels
-cv2.namedWindow('Controls', cv2.WINDOW_NORMAL | cv2.WINDOW_GUI_EXPANDED) # Added flag for better layout
-cv2.resizeWindow('Controls', 400, 200) # Adjust size
-
-# Create Trackbars
-cv2.createTrackbar('Manual Thresh', 'Controls', manual_thresh_value, 255, set_thresh)
-cv2.createTrackbar('Min Area', 'Controls', current_min_area, 5000, set_min_area) # Adjust range 0-5000 as needed
-cv2.createTrackbar('Max Area', 'Controls', current_max_area, max_area_slider_limit, set_max_area)
-
-# Initialize debug state variables
-debug_preprocess_mode = 0 # 0: None, 1: Manual, 2: Adaptive, 3: CLAHE
-debug_thresh_type = cv2.THRESH_BINARY # Start with Binary
-clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-
-processed_count = 0
-accepted_count = 0
-processed_image_filenames = [] # Keep track of filenames corresponding to objpoints/imgpoints
-
-for i, fname in enumerate(image_files):
-    print(f"\n[{processed_count+1}/{len(image_files)}] Processing: {os.path.basename(fname)}")
-    img_color = cv2.imread(fname)
-    if img_color is None:
-        print("  Warning: Could not read image.")
-        continue
-
-    # Check image shape consistency
-    current_img_shape = img_color.shape[:2] # (height, width)
-    if img_shape is None:
-        img_shape = current_img_shape
-        print(f"  Detected image size: {img_shape[1]}x{img_shape[0]} (WxH)")
-    elif current_img_shape != img_shape:
-         print(f"  Warning: Image size {current_img_shape} differs from first image {img_shape}. Skipping.")
-         continue
-
-    gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-    processed_gray = gray # Default: use original gray image if not debugging or if mode is 'None'
-
-    # --- DEBUG MODE: Interactive Preprocessing & Visualization ---
-    while True: # Loop for interactive debugging adjustments
-        vis_list = []
-
-        # --- 1. Original Color Image (scaled) ---
-        h_orig_color, w_orig_color = img_color.shape[:2]
-        max_h_vis = 350 # Max height for visualization panels
-        scale = max_h_vis / h_orig_color if h_orig_color > 0 else 1
-        vis_width = int(w_orig_color * scale)
-        vis_height = int(h_orig_color * scale)
-        vis_dim = (vis_width, vis_height)
-
-        vis_orig = cv2.resize(img_color, vis_dim, interpolation=cv2.INTER_AREA)
-        cv2.putText(vis_orig, 'Original', (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        vis_list.append(vis_orig)
-
-        # --- 2. Apply Selected Preprocessing ---
-        preprocess_desc = ""
-        # Apply preprocessing to a temporary variable for visualization
-        if debug_preprocess_mode == 2: # Manual Threshold
-            _, processed_gray_dbg = cv2.threshold(gray, manual_thresh_value, 255, debug_thresh_type)
-            preprocess_desc = f"Manual Th: {manual_thresh_value}, T:{'BIN' if debug_thresh_type==cv2.THRESH_BINARY else 'INV'}"
-        elif debug_preprocess_mode == 3: # Adaptive Threshold
-                # Block size must be odd and >= 3
-                # Link trackbar crudely for block size adjustment (example)
-                block_size = 11 + 2 * (manual_thresh_value // 32)
-                block_size = max(3, block_size | 1) # Ensure odd >= 3
-                C = 2 # Constant subtracted
-                processed_gray_dbg = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                                debug_thresh_type, block_size, C)
-                preprocess_desc = f"Adaptive G Th: B:{block_size}, C:{C}, T:{'BIN' if debug_thresh_type==cv2.THRESH_BINARY else 'INV'}"
-        elif debug_preprocess_mode == 0: # CLAHE
-            processed_gray_dbg = clahe.apply(gray)
-            preprocess_desc = "CLAHE Contrast"
-        elif debug_preprocess_mode == 1: # Mode 0: None (Use original grayscale)
-            processed_gray_dbg = gray.copy()
-            preprocess_desc = "Raw Grayscale"
-
-        # Prepare processed image for visualization (convert to BGR)
-        vis_proc = cv2.cvtColor(processed_gray_dbg, cv2.COLOR_GRAY2BGR)
-        vis_proc = cv2.resize(vis_proc, vis_dim, interpolation=cv2.INTER_NEAREST) # Nearest to see pixels if needed
-        cv2.putText(vis_proc, preprocess_desc, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        vis_list.append(vis_proc)
-
-        # --- Update Blob Detector Parameters from Sliders ---
-        # Ensure min < max from sliders
-        if current_min_area >= current_max_area:
-                current_max_area = current_min_area + 1
-                # Optional: Update slider position visually (might flicker)
-                # cv2.setTrackbarPos('Max Area', 'Controls', current_max_area)
-
-        params.minArea = current_min_area
-        params.maxArea = current_max_area
-        # Re-create detector with updated area params
-        blob_detector = cv2.SimpleBlobDetector_create(params)
-
-        # --- 3. Detect Blobs on the full-resolution processed image ---
-        keypoints = blob_detector.detect(processed_gray_dbg) # Detect on full-res DBG image
-
-        # --- Create scaled keypoints specifically for visualization ---
-        scaled_keypoints = []
-        h_detect, w_detect = processed_gray_dbg.shape[:2] # Dimensions blobs were detected on
-        h_vis_draw, w_vis_draw = vis_orig.shape[:2]      # Dimensions of the image to draw on
-
-        if h_detect > 0 and w_detect > 0:
-            scale_x = w_vis_draw / w_detect
-            scale_y = h_vis_draw / h_detect
-            vis_scale = (scale_x + scale_y) / 2.0 # Average scale for size
-
-            if keypoints: # Check if keypoints list is not empty
-                for kp in keypoints:
-                    # Scale the coordinates
-                    scaled_pt_x = kp.pt[0] * scale_x
-                    scaled_pt_y = kp.pt[1] * scale_y
-                    # Scale the size
-                    scaled_size = kp.size * vis_scale
-                    # Create a new KeyPoint object with scaled values
-                    scaled_kp = cv2.KeyPoint(x=scaled_pt_x, y=scaled_pt_y, size=max(1, scaled_size), # Ensure size > 0
-                                                angle=kp.angle, response=kp.response, octave=kp.octave,
-                                                class_id=kp.class_id)
-                    scaled_keypoints.append(scaled_kp)
-
-        # --- Draw the SCALED keypoints onto the SCALED visualization image ---
-        vis_blobs = vis_orig.copy() # Draw on a fresh copy of the scaled original
-        vis_blobs = cv2.drawKeypoints(
-            vis_blobs,          # The scaled image to draw on
-            scaled_keypoints,   # The list of *scaled* keypoints
-            np.array([]),
-            (0, 0, 255),        # Red blobs
-            cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS # Draws circles proportional to size
-        )
-        blob_text = f'Blobs: {len(keypoints)} (Area:{current_min_area}-{current_max_area})'
-        cv2.putText(vis_blobs, blob_text, (10, vis_blobs.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-        vis_list.append(vis_blobs)
-
-        # --- Display Debug Views ---
-        # Ensure all images have the same height before stacking
-        final_h = max(img.shape[0] for img in vis_list)
-        vis_list_resized = [cv2.resize(img, (int(img.shape[1] * final_h / img.shape[0]), final_h)) if img.shape[0] != final_h else img for img in vis_list]
-        debug_vis = np.hstack(vis_list_resized)
-        cv2.imshow('Debug View', debug_vis)
-        key = cv2.waitKey(10) & 0xFF # Use waitKey(10) for responsiveness to sliders
-
-        # --- Handle Debug Keystrokes ---
-        if key == ord(' '): # Space: Proceed with findCirclesGrid using current settings
-            # Set the processed_gray that will be used by findCirclesGrid
-            processed_gray = processed_gray_dbg
-            print(f"  DEBUG: Proceeding with Preproc: {preprocess_desc}, Area: {current_min_area}-{current_max_area}")
-            break # Exit debug adjustment loop, proceed to findCirclesGrid
-        elif key == ord('m'): # Switch preprocessing mode
-            debug_preprocess_mode = (debug_preprocess_mode + 1) % 4 # Cycle through 0, 1, 2, 3
-            print(f"  DEBUG: Switched Preprocessing Mode to {debug_preprocess_mode}")
-        elif key == ord('t'): # Toggle threshold type
-            debug_thresh_type = cv2.THRESH_BINARY if debug_thresh_type == cv2.THRESH_BINARY_INV else cv2.THRESH_BINARY
-            print(f"  DEBUG: Switched Threshold Type to {'BINARY' if debug_thresh_type==cv2.THRESH_BINARY else 'BINARY_INV'}")
-        elif key == ord('s'): # Skip image
-            print("  Skipped (Debug).")
-            processed_gray = None # Signal to skip findCirclesGrid
-            break
-        elif key == ord('q'): # Quit
-            print("\nQuitting application.")
-            cv2.destroyAllWindows()
-            sys.exit(0)
-            # Else: trackbar change or other key, loop again to update view
-
-    # --- End of Debug adjustment loop ---
-    if processed_gray is None: # Image was skipped in debug mode
-        processed_count += 1
-        continue # Go to next image
-
-    # --- Find the circle grid centers ---
-    # Use the 'processed_gray' which was determined above (either original gray or from debug step)
-    # Use the 'blob_detector' which potentially has updated parameters from debug sliders
-
-    # Consider adding CALIB_CB_CLUSTERING if needed
+def find_grid_in_image(img: np.ndarray, gray: np.ndarray, detector: cv2.SimpleBlobDetector, objp: np.ndarray, pattern_size: Tuple[int, int], args: argparse.Namespace) -> Optional[np.ndarray]:
+    """Tries a sequence of methods to find the grid in an image."""
     flags = cv2.CALIB_CB_ASYMMETRIC_GRID | cv2.CALIB_CB_CLUSTERING
-
-    # Ensure the detector passed has the latest parameters if in debug mode
-    # (It should, due to recreation in the debug loop)
-    ret, corners = cv2.findCirclesGrid(
-        processed_gray,      # Use the potentially preprocessed image
-        pattern_size,
-        flags=flags,
-        blobDetector=blob_detector # Pass the explicitly created/updated detector
-    )
-
-    processed_count += 1 # Increment here, after attempt is made
-
-    # try automated hexagonal grid detection
-    keypoints = blob_detector.detect(processed_gray) # Make sure keypoints are detected
-
-    if keypoints:
-        if not ret:
-            print("  No grid detected, attempting automated hexagonal grid matching...")
-            # Use the auto_asymm_cricle_hexagon_matching function to find the grid
-            corners = auto_asymm_cricle_hexagon_matching(keypoints, pattern_size, visualize=args.visualize_hex_grid)
-
-            if corners is not None:
-                print("  Hexagonal grid matching successful!")
-                ret = True
-            else:
-                print("Hexagonal matching failed")
-
-        if not ret:
-            corners_manual = outer_corner_assisted_local_vector_walk(img_color, keypoints, objp, pattern_size, args.visualize_serpentine)
-            if corners_manual is not None:
-                ret = True
-                corners = corners_manual
-                print("  Assisted matching successful!")
-            else:
-                print("  Assisted matching failed.")
-                ret = False
-    else:
-        print("  No keypoints detected, skipping this image.")
-        ret = False
-        corners = None
-
-    # --- Show Final Detection Result and Ask for Confirmation ---
+    ret, corners = cv2.findCirclesGrid(gray, pattern_size, flags=flags, blobDetector=detector)
     if ret:
-        print(f"  Grid detected! ({pattern_size[0]}x{pattern_size[1]})")
-        processed_image_filenames.append(fname) # Store filename for accepted view
-        # corners are the detected circle centers (N, 1, 2)
+        print("  cv2.findCirclesGrid successful.")
+        return corners
 
-        vis_img = img_color.copy()
+    keypoints = detector.detect(gray)
+    if not keypoints:
+        print("  No blobs detected, cannot attempt custom finders.")
+        return None
+    
+    print("  findCirclesGrid failed. Trying custom hexagonal finder...")
+    corners = auto_asymm_cricle_hexagon_matching(keypoints, pattern_size, visualize=args.visualize_hex_grid)
+    if corners is not None:
+        print("  Hexagonal auto-finder successful.")
+        return corners
+
+    print("  Hexagonal auto-finder failed. Trying assisted serpentine finder...")
+
+    if not args.no_manual_backup:
+        corners = outer_corner_assisted_local_vector_walk(img, keypoints, objp, pattern_size, args.visualize_serpentine)
+        if corners is not None:
+            print("  Assisted serpentine finder successful.")
+            return corners
+        
+    print("  All finders failed.")
+    return None
+
+def run_calibration(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], image_size: Tuple[int, int], filenames: List[str]) -> Optional[Dict[str, Any]]:
+    """Performs fisheye calibration, with robust iterative removal of bad views."""
+    print(f"\nRunning fisheye calibration with {len(objpoints)} views...")
+    K_init, D_init = np.eye(3), np.zeros((4, 1))
+    calib_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_CHECK_COND | cv2.fisheye.CALIB_FIX_SKEW
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+
+    for attempt in range(5): # Try up to 5 removal attempts
+        if len(objpoints) < MIN_IMAGES_FOR_CALIB:
+            print(f"  Stopping removal attempts. View count ({len(objpoints)}) is below minimum ({MIN_IMAGES_FOR_CALIB}).")
+            break
+        try:
+            print(f"  Attempting calibration with {len(objpoints)} views...")
+            ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(objpoints, imgpoints, image_size, K_init, D_init, flags=calib_flags, criteria=criteria)
+            print("  Calibration successful!")
+            return {'ret': ret, 'K': K, 'D': D, 'rvecs': rvecs, 'tvecs': tvecs, 'objpoints': objpoints, 'imgpoints': imgpoints, 'filenames': filenames}
+        except cv2.error as e:
+            print(f"  OpenCV error: {e}. Removing a random view and retrying...")
+            if "CALIB_CHECK_COND" in str(e):
+                idx_to_remove = random.randrange(len(objpoints))
+                removed_file = os.path.basename(filenames.pop(idx_to_remove))
+                objpoints.pop(idx_to_remove)
+                imgpoints.pop(idx_to_remove)
+                print(f"  Randomly removed: {removed_file}")
+            else:
+                print("  Error is not CALIB_CHECK_COND. Cannot recover. Aborting.")
+                return None
+    
+    print("Calibration failed after multiple removal attempts.")
+    return None
+
+def save_calibration_results(filepath: str, img_shape: Tuple[int, int], calib_data: Dict[str, Any]):
+    """Saves final calibration data to an .npz file."""
+    print(f"\nSaving calibration data to: {filepath}")
+    try:
+        np.savez(filepath, K=calib_data['K'], D=calib_data['D'], img_shape=img_shape, rms=calib_data['ret'],
+                 objpoints=np.array(calib_data['objpoints'], dtype=object),
+                 imgpoints=np.array(calib_data['imgpoints'], dtype=object),
+                 filenames=np.array(calib_data['filenames']))
+        print("Data saved successfully.")
+    except Exception as e:
+        print(f"Error saving data: {e}")
+
+def main():
+    """Main execution function."""
+    args = parse_arguments()
+    
+    pattern_size = (args.cols, args.rows)
+    objp = generate_object_points(pattern_size, args.spacing)
+    image_files = find_image_files(args.dir, args.ext)
+    
+    # Setup Blob Detector
+    params = cv2.SimpleBlobDetector_Params()
+    params.filterByArea = True; params.minArea = 30; params.maxArea = 10000
+    params.filterByCircularity = True; params.minCircularity = 0.5
+    params.filterByConvexity = True; params.minConvexity = 0.80
+    params.filterByInertia = True; params.minInertiaRatio = 0.1
+    blob_detector = cv2.SimpleBlobDetector_create(params)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    
+    tuner = InteractiveTuner(params) if args.debug else None
+    if tuner: tuner.setup_windows()
+
+    objpoints_all, imgpoints_all, filenames_all = [], [], []
+    img_shape = None
+
+    for i, fname in enumerate(image_files):
+        print(f"\n[{i+1}/{len(image_files)}] Processing: {os.path.basename(fname)}")
+        img_color = cv2.imread(fname)
+        if img_color is None:
+            print("  Warning: Could not read image.")
+            continue
+        
+        if img_shape is None: img_shape = img_color.shape[:2]
+        if img_color.shape[:2] != img_shape:
+            print(f"  Warning: Image size mismatch. Skipping.")
+            continue
+
+        gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
+        
+        if tuner:
+            processed_gray, blob_detector = tuner.run_debug_loop(img_color, gray)
+            if processed_gray is None:
+                print("  Skipped in debug mode.")
+                continue
+        else:
+            print("  Applying CLAHE preprocessing...")
+            processed_gray = clahe.apply(gray)
+            
+        corners = find_grid_in_image(img_color, processed_gray, blob_detector, objp, pattern_size, args)
+
+        ask_confirm = args.no_confirm is not True
 
         if corners is not None:
-            corners = corners.astype(np.float32)
-            cv2.drawChessboardCorners(vis_img, pattern_size, corners, ret) # Works for circles too
-
-        # Display the image with detected corners for confirmation
-        cv2.namedWindow('Detection Confirmation', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Detection Confirmation', 800, 600) # Adjust size as needed
-        cv2.imshow('Detection Confirmation', vis_img)
-
-        while True:
-            key = cv2.waitKey(0) & 0xFF # Wait indefinitely for user input
-            if key == ord('y'):
-                print("  Accepted.")
-                objpoints.append(objp.reshape(-1, 1, 3))
-                imgpoints.append(corners) # Append the detected corners
-                accepted_count += 1
-                processed_image_filenames.append(fname) # Store filename for accepted view
-                break
-            elif key == ord('n') or key == ord('s'): # Allow 's' for skip here too
-                print("  Rejected.")
-                break
-            elif key == ord('q'):
-                print("\nQuitting detection phase.")
-                cv2.destroyAllWindows()
-                sys.exit(0)
+            if ask_confirm:
+                print("  Grid found. Please confirm.")
+                vis_confirm = img_color.copy()
+                cv2.drawChessboardCorners(vis_confirm, pattern_size, corners, True)
+                # Resize confirmation window for smaller display
+                h, w = vis_confirm.shape[:2]
+                vis_h = 700
+                vis_w = int(w * vis_h / h)
+                vis_small = cv2.resize(vis_confirm, (vis_w, vis_h))
+                cv2.namedWindow('Detection Confirmation', cv2.WINDOW_NORMAL)
+                cv2.resizeWindow('Detection Confirmation', vis_w, vis_h)
+                cv2.imshow('Detection Confirmation', vis_small)
+                key = cv2.waitKey(0) & 0xFF
+                if key == ord('y'):
+                    print("  Accepted.")
+                    objpoints_all.append(objp.reshape(-1,1,3))
+                    imgpoints_all.append(corners.reshape(-1,1,2))
+                    filenames_all.append(fname)
+                elif key == ord('q'):
+                    print("Quitting.")
+                    break
+                else:
+                    print("  Rejected.")
+                cv2.destroyWindow('Detection Confirmation')
             else:
-                print("  Invalid key. Press 'y' (accept), 'n' (reject), or 'q' (quit).")
-        cv2.destroyWindow('Detection Confirmation') # Close confirmation window
-        ret = False
+                # auto-accept without prompt
+                print("  Grid found. Auto-accepting (ask_confirm=False).")
+                objpoints_all.append(objp.reshape(-1,1,3))
+                imgpoints_all.append(corners.reshape(-1,1,2))
+                filenames_all.append(fname)
+
+    cv2.destroyAllWindows()
+
+    if len(objpoints_all) < MIN_IMAGES_FOR_CALIB:
+        print(f"\nError: Insufficient views for calibration. Found {len(objpoints_all)}, need {MIN_IMAGES_FOR_CALIB}.")
+        return
+
+    image_size_wh = (img_shape[1], img_shape[0])
+    calib_data = run_calibration(objpoints_all, imgpoints_all, image_size_wh, filenames_all)
+
+    if calib_data:
+        # --- NEW: Call the reporting and visualization function here ---
+        report_and_visualize_results(calib_data, img_shape)
+        
+        # Then save the results as before
+        save_calibration_results(args.output, img_shape, calib_data)
 
 
-
-# --- End of Image Processing Loop ---
-cv2.destroyWindow('Debug View')
-cv2.destroyWindow('Controls')
-cv2.destroyAllWindows() # Close any other remaining OpenCV windows
-
-# --- Perform Calibration ---
-print(f"\nCollected {accepted_count} valid views out of {processed_count} processed images.")
-
-if accepted_count < min_images_for_calib:
-    print(f"Error: Insufficient number of valid views ({accepted_count}). Need at least {min_images_for_calib}.")
-    if processed_count > 0 and accepted_count == 0:
-        print("Possible issues:")
-        print("- Blob detector parameters might be wrong (check min/max Area especially in debug mode).")
-        print("- Preprocessing might be needed (try debug mode with thresholding/CLAHE).")
-        print("- Grid parameters (--cols, --rows) might not match the physical grid.")
-        print("- Lighting conditions might be poor (shadows, glare).")
-        print("- Image quality might be low (blur, noise).")
-        print("- Grid geometry might be too distorted in all views for internal checks.")
-    sys.exit(1)
-
-if img_shape is None:
-    print("Error: Could not determine image shape (no images processed successfully?).")
-    sys.exit(1)
-
-print(f"\nRunning fisheye calibration with image size: {img_shape[::-1]} (width, height)...")
-
-# Calibration flags
-calib_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_CHECK_COND | cv2.fisheye.CALIB_FIX_SKEW
-# Consider adding: cv2.fisheye.CALIB_FIX_PRINCIPAL_POINT if center is known reliably
-# Consider adding: cv2.fisheye.CALIB_FIX_K[1,2,3,4] if optimization is unstable
-
-# NOTE: cv2.fisheye.calibrate requires image_size as (WIDTH, HEIGHT).
-image_size_wh = (img_shape[1], img_shape[0])
-
-# Termination criteria for the optimization process
-criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
-import random # <-- Add this import at the top of your script
-
-# --- (Keep all the code above the Perform Calibration section the same) ---
-
-# --- Perform Calibration ---
-print(f"\nCollected {accepted_count} valid views out of {processed_count} processed images.")
-
-if accepted_count < min_images_for_calib:
-    print(f"Error: Insufficient number of valid views ({accepted_count}). Need at least {min_images_for_calib}.")
-    # ... (keep existing error message suggestions) ...
-    sys.exit(1)
-
-if img_shape is None:
-    print("Error: Could not determine image shape (no images processed successfully?).")
-    sys.exit(1)
-
-print(f"\nRunning fisheye calibration with image size: {img_shape[::-1]} (width, height)...")
-
-# Prepare for fisheye calibration
-K_init = np.eye(3)
-D_init = np.zeros((4, 1))
-calib_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_CHECK_COND | cv2.fisheye.CALIB_FIX_SKEW
-image_size_wh = (img_shape[1], img_shape[0])
-criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
-
-# --- Variables to hold the final successful calibration results ---
-final_ret = None
-final_K = None
-final_D = None
-final_rvecs = None
-final_tvecs = None
-final_objpoints = objpoints # Start with all accepted points
-final_imgpoints = imgpoints
-final_filenames = processed_image_filenames
-final_accepted_count = accepted_count
-calibration_succeeded = False # Flag to track success
-
-# --- Configuration for Randomized Removal ---
-max_random_attempts = 5 # How many times to try the random removal process
-print(f"Will attempt randomized removal up to {max_random_attempts} times if initial calibration fails.")
-
-try:
-    print(f"\nAttempting initial calibration with {len(final_objpoints)} views...")
-    ret, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
-        final_objpoints,
-        final_imgpoints,
-        image_size_wh,
-        K_init,
-        D_init,
-        flags=calib_flags,
-        criteria=criteria
-    )
-    # If successful on the first try:
-    final_ret = ret
-    final_K = K
-    final_D = D
-    final_rvecs = rvecs
-    final_tvecs = tvecs
-    calibration_succeeded = True
-    print("Initial calibration attempt successful.")
-
-except cv2.error as e:
-    print(f"\n!!! Initial OpenCV Error during calibration: {e}")
-    # --- START: Randomized Iterative Removal Logic ---
-    if "CALIB_CHECK_COND" in str(e) and accepted_count >= min_images_for_calib:
-        print(f"\nAttempting randomized iterative removal (up to {max_random_attempts} attempts)...")
-
-        for attempt in range(max_random_attempts):
-            print(f"\n--- Random Removal Attempt {attempt + 1}/{max_random_attempts} ---")
-
-            # --- Reset state for this attempt ---
-            # Work on copies so we don't modify the original full lists *across attempts*
-            objpoints_copy = list(objpoints)
-            imgpoints_copy = list(imgpoints)
-            filenames_copy = list(processed_image_filenames)
-            current_view_count = accepted_count
-            removed_in_this_attempt = [] # Keep track of removals in this specific attempt
-
-            # --- Inner loop: Randomly remove images until success or minimum count reached ---
-            while current_view_count >= min_images_for_calib:
-                try:
-                    print(f"  Attempt {attempt+1}: Retrying calibration with {current_view_count} views...")
-                    ret_iter, K_iter, D_iter, rvecs_iter, tvecs_iter = cv2.fisheye.calibrate(
-                        objpoints_copy,
-                        imgpoints_copy,
-                        image_size_wh,
-                        K_init, # Re-use initial K guess
-                        D_init, # Re-use initial D guess
-                        flags=calib_flags,
-                        criteria=criteria
-                    )
-                    # SUCCESS!
-                    print(f"  Calibration succeeded in attempt {attempt + 1} after removing {accepted_count - current_view_count} view(s).")
-                    print(f"  Views removed in this successful attempt: {removed_in_this_attempt}")
-                    final_ret = ret_iter
-                    final_K = K_iter
-                    final_D = D_iter
-                    final_rvecs = rvecs_iter
-                    final_tvecs = tvecs_iter
-                    final_objpoints = objpoints_copy # Keep the successful subset
-                    final_imgpoints = imgpoints_copy
-                    final_filenames = filenames_copy
-                    final_accepted_count = current_view_count # Update the count
-                    calibration_succeeded = True
-                    break # Exit the inner while loop (this attempt was successful)
-
-                except cv2.error as inner_e:
-                    # Still failing, remove a RANDOM image and try again
-                    if current_view_count > min_images_for_calib:
-                        # --- Random Selection ---
-                        idx_to_remove = random.randrange(current_view_count)
-                        removed_filename = os.path.basename(filenames_copy[idx_to_remove])
-                        print(f"    Attempt {attempt+1}: Calibration failed again ({inner_e}). Randomly removing view {idx_to_remove + 1}/{current_view_count}: {removed_filename}")
-
-                        # Remove from copies using the random index
-                        objpoints_copy.pop(idx_to_remove)
-                        imgpoints_copy.pop(idx_to_remove)
-                        filenames_copy.pop(idx_to_remove)
-                        removed_in_this_attempt.append(removed_filename) # Track removal for this attempt
-                        current_view_count -= 1
-                        # Loop continues to retry calibration
-                    else:
-                        # Reached minimum images and still failed *within this attempt*
-                        print(f"    Attempt {attempt+1}: Calibration failed with minimum required views ({min_images_for_calib}). Stopping this removal path.")
-                        break # Exit the inner while loop for this attempt
-
-                except Exception as general_exception:
-                     print(f"\n!!! An unexpected error occurred during attempt {attempt+1}'s calibration: {general_exception}")
-                     import traceback
-                     traceback.print_exc()
-                     break # Stop this attempt's inner loop on unexpected errors
-
-            # --- Check if this attempt succeeded ---
-            if calibration_succeeded:
-                break # Exit the outer for loop (attempts loop) because we found a working set
-
-        # --- After all attempts ---
-        if not calibration_succeeded:
-            print(f"\nRandomized iterative removal failed after {max_random_attempts} attempts.")
-            # Optional: Keep the original error message 'e' available if needed
-            print("Original error likely persisted or occurred with minimum views across multiple random paths.")
-
-    else:
-        # Error was not CALIB_CHECK_COND or not enough images to start removing
-        print("Cannot attempt iterative removal (error not CALIB_CHECK_COND or insufficient initial views).")
-        print("Consider checking input points, view variation, or objp definition.")
-    # --- END: Randomized Iterative Removal Logic ---
-
-except Exception as e:
-     print(f"\n!!! An unexpected GENERAL error occurred during initial calibration: {e}")
-     import traceback
-     traceback.print_exc()
-     # calibration_succeeded remains False
-
-
-# --- Results ---
-# Now, base the rest of the script on the 'calibration_succeeded' flag
-# and use the 'final_' variables which hold the results either from the
-# initial attempt or the successful randomized iterative attempt.
-
-if calibration_succeeded:
-    print("\nCalibration successful!")
-    print(f"  Used {final_accepted_count} views for final calibration.") # Report the number used
-    print(f"  RMS reprojection error: {final_ret:.4f} pixels")
-    print("\nCamera Matrix (K):")
-    print(final_K)
-    print("\nDistortion Coefficients (D) [k1, k2, k3, k4]:")
-    print(final_D.flatten())
-
-    # --- Save Results ---
-    print(f"\nSaving calibration data to: {output_file}")
-    try:
-        # Save the results from the SUCCESSFUL calibration
-        np.savez(output_file, K=final_K, D=final_D, img_shape=img_shape, rms=final_ret,
-                 objpoints=np.array(final_objpoints, dtype=object), # Save points ACTUALLY used
-                 imgpoints=np.array(final_imgpoints, dtype=object),
-                 filenames=np.array(final_filenames)) # Save corresponding filenames
-        print("Data saved.")
-    except Exception as e:
-        print(f"Error saving data to {output_file}: {e}")
-
-    # --- Visualize Calibration Point Coverage ---
-    # (Code remains the same, using final_imgpoints)
-    print("\nVisualizing overall calibration point coverage...")
-    if img_shape is not None and len(final_imgpoints) > 0:
-        coverage_img = np.full((img_shape[0], img_shape[1], 3), 255, dtype=np.uint8)
-        total_points_drawn = 0
-        point_color = (0, 0, 255); point_radius = 2
-
-        for view_corners in final_imgpoints: # Iterate through points from each USED view
-            for corner in view_corners:
-                center = tuple(corner[0].astype(int))
-                cv2.circle(coverage_img, center, point_radius, point_color, -1)
-                total_points_drawn += 1
-
-        cv2.putText(coverage_img, f"Coverage: {total_points_drawn} points from {len(final_imgpoints)} views",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 1, cv2.LINE_AA)
-
-        cv2.namedWindow("Calibration Point Coverage", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Calibration Point Coverage", 800, int(800 * img_shape[0] / img_shape[1]))
-        cv2.imshow("Calibration Point Coverage", coverage_img)
-        print(f"  Displayed coverage map with {total_points_drawn} points.")
-        print("  Press any key in the 'Calibration Point Coverage' window to continue...")
-        cv2.waitKey(0)
-        cv2.destroyWindow("Calibration Point Coverage")
-    else:
-        print("  Skipping coverage visualization (no image shape or no accepted points).")
-
-
-    # --- Optional: Calculate Reprojection Error Manually ---
-    # (Code remains the same, using final_ variables)
-    print("\nCalculating reprojection errors per image (for the successful set)...")
-    total_error = 0
-    per_view_errors = []
-    if len(final_objpoints) > 0 and len(final_rvecs) == len(final_objpoints) and len(final_tvecs) == len(final_objpoints):
-        for i in range(len(final_objpoints)):
-            try:
-                imgpoints2, _ = cv2.fisheye.projectPoints(final_objpoints[i], final_rvecs[i], final_tvecs[i], final_K, final_D)
-                error = cv2.norm(final_imgpoints[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
-                per_view_errors.append(error)
-                total_error += error
-                # Optional: Print per-view error using final_filenames
-                # print(f"  Image {i+1} ({os.path.basename(final_filenames[i])}): {error:.4f} pixels")
-            except cv2.error as proj_err:
-                print(f"  Warning: Could not project points for image {i} ({os.path.basename(final_filenames[i])}). Error: {proj_err}")
-                per_view_errors.append(np.inf)
-
-        mean_error = total_error / len(final_objpoints) if len(final_objpoints) > 0 else 0
-        print(f"\nAverage reprojection error (calculated manually): {mean_error:.4f} pixels")
-    else:
-         print("\nSkipping manual reprojection error calculation (missing points or extrinsics).")
-
-
-    # --- Visualize Undistortion ---
-    # (Code remains the same, using final_ variables)
-    print("\nVisualizing undistortion on the first accepted sample image...")
-    if final_accepted_count > 0 and final_filenames:
-        first_accepted_img_path = final_filenames[0] # Use the first from the FINAL successful set
-        img_distorted = cv2.imread(first_accepted_img_path)
-
-        if img_distorted is not None:
-            h, w = img_distorted.shape[:2]
-            balance = 0.0
-            # Use final K and D for undistortion
-            Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(final_K, final_D, image_size_wh, np.eye(3), balance=balance)
-            map1, map2 = cv2.fisheye.initUndistortRectifyMap(final_K, final_D, np.eye(3), Knew, image_size_wh, cv2.CV_16SC2)
-            img_undistorted = cv2.remap(img_distorted, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-
-            vis_compare = np.hstack((img_distorted, img_undistorted))
-            cv2.namedWindow('Distorted vs Undistorted', cv2.WINDOW_NORMAL)
-            cv2.resizeWindow('Distorted vs Undistorted', 1200, 600)
-            cv2.imshow('Distorted vs Undistorted', vis_compare)
-            print(f"Displaying undistortion result for {os.path.basename(first_accepted_img_path)}. Press any key to exit.")
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
-        else:
-            print(f"Warning: Could not reload sample image {first_accepted_img_path} for visualization.")
-    else:
-         print("No valid images were accepted, cannot visualize undistortion.")
-
-
-else: # calibration_succeeded is False
-    print("\nCalibration failed. The optimization could not converge, even after attempting randomized removal.")
-    print("Possible reasons include:")
-    print("- Persistently poor quality detections (high initial reprojection error).")
-    print("- Insufficient number of *good* views or lack of variation even after removal.")
-    print("- Incorrect grid parameters (--cols, --rows, --spacing).")
-    print("- Severe numerical instability not resolved by removing views.")
-
-print("\nCalibration process finished.")
+if __name__ == '__main__':
+    main()
