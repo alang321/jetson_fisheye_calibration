@@ -4,9 +4,10 @@ import os
 import glob
 import argparse
 import sys
-from scipy.spatial import distance # For efficient nearest neighbor searches
+from scipy.spatial import distance, KDTree # For efficient nearest neighbor searches
+from sklearn.neighbors import NearestNeighbors
 import math # For checking NaN
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import radius_neighbors_graph
 
@@ -49,7 +50,11 @@ def run_four_corner_local_vector_walk(
     corner_labels = ["Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"]
 
     while True:
-        auto_corners = auto_find_corners(detected_keypoints, min_cluster_size=num_expected_points, visualize=True)
+        auto_grid = find_grid_adaptive(
+            keypoints=detected_keypoints,
+            pattern_size=(cols, rows),
+            visualize=True
+        )
 
         clicked_indices = _get_four_corners_from_user(image_to_select_on, kp_coords, corner_labels)
         if not clicked_indices:
@@ -99,167 +104,366 @@ def run_four_corner_local_vector_walk(
 
         print("  Successfully matched all points.")
         return final_corners
+    
+# _find_best_row_in_pool remains the same as the previous version.
+# The visualization for its output is handled in the main function.
 
-# --- Helper Function 1: User Corner Selection ---
-
-def auto_find_corners(
-    keypoints: List[cv2.KeyPoint],
-    min_cluster_size: int = 15,
-    visualize: bool = False
-):
+# This function is unchanged as it contains no visualization code.
+def _find_best_row_in_pool(
+    pool_coords: np.ndarray,
+    pool_indices: np.ndarray,
+    num_cols_expected: int,
+    nn_search_k: int = 7,
+    search_radius_factor: float = 0.6,
+    consistency_weight: float = 0.5,
+    visualize: bool = False,
+) -> Optional[np.ndarray]:
     """
-    Automatically finds grid corners in distorted (fisheye) images.
-
-    This method uses a two-stage cleaning process robust to geometric distortion:
-    1.  DBSCAN: Performs an initial clustering to separate the main pattern from
-        clearly detached outlier blobs.
-    2.  Topological Pruning: Models the resulting cluster as a graph and
-        iteratively removes "dead-end" nodes (degree 1), which correspond to
-        noisy tendrils. This preserves the core, interconnected body of the grid.
-
-    Finally, it finds the corners of the cleaned, core group of points.
+    Searches a pool of points to find the most consistent, straightest possible row.
 
     Args:
-        keypoints: A list of cv2.KeyPoint objects from a blob detector.
-        min_cluster_size: The minimum number of points required to form a valid cluster.
-        visualize: If True, displays a visualization of the process.
+        pool_coords: Coordinates of points to search within.
+        pool_indices: Original indices corresponding to pool_coords.
+        num_cols_expected: The target length of the row.
+        nn_search_k: Number of nearest neighbors to consider for starting a chain.
+        search_radius_factor: Multiplier for local spacing to define search radius.
+        consistency_weight: Weight for scoring angle vs. distance consistency.
 
     Returns:
-        A dictionary mapping corner labels to their original keypoint indices,
-        or None if the process fails.
+        An array of original indices representing the best row found, or None.
     """
-    if len(keypoints) < min_cluster_size:
-        print("Auto-find fisheye: Not enough keypoints provided.")
+    if len(pool_coords) < num_cols_expected:
         return None
 
-    kp_coords = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+    kdtree = KDTree(pool_coords)
+    found_rows = []
 
-    # --- 1. Initial Clustering with DBSCAN ---
-    # Estimate `eps` based on median distance to adapt to pattern scale
-    from sklearn.neighbors import NearestNeighbors
-    nn = NearestNeighbors(n_neighbors=4).fit(kp_coords)
-    distances, _ = nn.kneighbors(kp_coords)
-    median_dist = np.median(distances[:, -1])
-    eps = median_dist * 1.5
-
-    db = DBSCAN(eps=eps, min_samples=4).fit(kp_coords)
-    labels = db.labels_
-    
-    unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)
-    if len(counts) == 0:
-        print("Auto-find fisheye: DBSCAN found no valid clusters.")
-        return None
+    for i, p1_coord in enumerate(pool_coords):
+        # Find k nearest neighbors to start a chain
+        distances, neighbor_indices = kdtree.query(p1_coord, k=nn_search_k)
         
-    main_cluster_label = unique_labels[np.argmax(counts)]
-    
-    candidate_mask = (labels == main_cluster_label)
-    if np.sum(candidate_mask) < min_cluster_size:
-        print(f"Auto-find fisheye: Main cluster is too small ({np.sum(candidate_mask)} points).")
-        return None
-        
-    candidate_indices = np.where(candidate_mask)[0]
-    candidate_coords = kp_coords[candidate_indices]
-
-    # --- 2. Build and Prune Proximity Graph ---
-    # Build graph where nodes are connected if they are within `eps` distance
-    adjacency_matrix = radius_neighbors_graph(candidate_coords, radius=eps, mode='connectivity')
-    
-    # Create an adjacency list (dict) for easier manipulation
-    graph = {i: set() for i in range(adjacency_matrix.shape[0])}
-    # Extract edges from sparse adjacency matrix
-    rows, cols = adjacency_matrix.nonzero()
-    for i, j in zip(rows, cols):
-        if i != j:
-            graph[i].add(j)
-            graph[j].add(i)
-
-    # Iteratively prune nodes with degree 1
-    while True:
-        degrees = {node: len(neighbors) for node, neighbors in graph.items()}
-        nodes_to_remove = [node for node, degree in degrees.items() if degree == 1]
-        
-        if not nodes_to_remove:
-            break  # The graph is stable
-
-        for node in nodes_to_remove:
-            if node in graph: # Ensure node wasn't removed as a neighbor already
-                neighbor = list(graph[node])[0]
-                # Remove node and its connection from the neighbor
-                del graph[node]
-                if neighbor in graph:
-                    graph[neighbor].remove(node)
-    
-    core_local_indices = list(graph.keys())
-    if len(core_local_indices) < 4:
-        print("Auto-find fisheye: Not enough points remained after topological pruning.")
-        return None
-
-    # --- 3. Find Corners of the Cleaned Core Grid ---
-    # Map local indices from the candidate cluster to the final core cluster
-    core_coords = candidate_coords[core_local_indices]
-    core_original_indices = candidate_indices[core_local_indices]
-    
-    # On the cleaned points, the convex hull is now reliable
-    try:
-        hull_indices = cv2.convexHull(core_coords, returnPoints=False).flatten()
-    except Exception:
-        print("Auto-find fisheye: Could not compute convex hull on pruned points.")
-        return None # Happens if points are co-linear
-
-    hull_points = core_coords[hull_indices]
-    
-    # Use sum/difference method to find corner points on the hull
-    sum_coords = hull_points.sum(axis=1)
-    diff_coords = np.diff(hull_points, axis=1).flatten()
-
-    tl_hull_idx = np.argmin(sum_coords)
-    br_hull_idx = np.argmax(sum_coords)
-    tr_hull_idx = np.argmax(diff_coords)
-    bl_hull_idx = np.argmin(diff_coords)
-
-    # Map hull indices back to original keypoint indices
-    corner_indices = {
-        "Top-Left":     core_original_indices[hull_indices[tl_hull_idx]],
-        "Top-Right":    core_original_indices[hull_indices[tr_hull_idx]],
-        "Bottom-Left":  core_original_indices[hull_indices[bl_hull_idx]],
-        "Bottom-Right": core_original_indices[hull_indices[br_hull_idx]]
-    }
-
-    # 4. Visualization (Optional)
-    # ---
-    if visualize:
-        # Create a small window for visualization
-        win_name = "Auto Corner Detection"
-        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win_name, 600, 400)
-
-        max_x = int(np.max(kp_coords[:, 0])) + 50
-        max_y = int(np.max(kp_coords[:, 1])) + 50
-        vis_img = np.zeros((max_y, max_x, 3), dtype=np.uint8)
-        
-        # Draw pruned points (in candidate cluster but not in final core)
-        pruned_mask = np.ones(len(candidate_coords), bool)
-        pruned_mask[core_local_indices] = False
-        for pt in candidate_coords[pruned_mask]:
-            cv2.circle(vis_img, tuple(pt.astype(int)), 5, (0, 165, 255), -1) # Orange for pruned
-        
-        # Draw final core points
-        for pt in core_coords:
-            cv2.circle(vis_img, tuple(pt.astype(int)), 5, (0, 200, 0), -1) # Green for core
+        for j, p2_coord in zip(neighbor_indices[1:], pool_coords[neighbor_indices[1:]]):
+            # Start a new chain
+            current_chain_indices = [i, j]
             
-        # Highlight final corners
-        corner_colors = {"Top-Left": (0, 255, 0), "Top-Right": (0, 255, 255), "Bottom-Left": (255, 255, 0), "Bottom-Right": (255, 0, 255)}
-        for name, idx in corner_indices.items():
-            pt = kp_coords[idx]
-            cv2.circle(vis_img, tuple(pt.astype(int)), 10, corner_colors[name], 2)
-            cv2.putText(vis_img, name, (int(pt[0])+12, int(pt[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.5, corner_colors[name], 1)
+            while len(current_chain_indices) < num_cols_expected:
+                # Predict the next point's position
+                p_prev_idx = current_chain_indices[-2]
+                p_curr_idx = current_chain_indices[-1]
+                
+                p_prev, p_curr = pool_coords[p_prev_idx], pool_coords[p_curr_idx]
+                
+                step_vector = p_curr - p_prev
+                predicted_coord = p_curr + step_vector
+                
+                # Search for the best match near the prediction
+                step_dist = np.linalg.norm(step_vector)
+                search_radius = step_dist * search_radius_factor
+                
+                possible_next_indices = kdtree.query_ball_point(predicted_coord, r=search_radius)
+                
+                best_next_idx = -1
+                min_dist_to_pred = float('inf')
+                
+                for next_idx in possible_next_indices:
+                    if next_idx not in current_chain_indices:
+                        dist = np.linalg.norm(pool_coords[next_idx] - predicted_coord)
+                        if dist < min_dist_to_pred:
+                            min_dist_to_pred = dist
+                            best_next_idx = next_idx
+                
+                if best_next_idx != -1:
+                    current_chain_indices.append(best_next_idx)
+                else:
+                    break # Chain broken
+            
+            if len(current_chain_indices) == num_cols_expected:
+                found_rows.append(current_chain_indices)
 
-        cv2.imshow(win_name, vis_img)
+    if not found_rows:
+        return None
+    
+
+    # Score the found rows based on consistency of angle and distance
+    best_row = None
+    min_score = float('inf')
+
+    for row_local_indices in found_rows:
+        row_coords = pool_coords[row_local_indices]
+        vectors = np.diff(row_coords, axis=0)
+        distances = np.linalg.norm(vectors, axis=1)
+        
+        # Normalize vectors to get angles
+        norm_vectors = vectors / distances[:, np.newaxis]
+        # Dot product of adjacent normalized vectors gives cosine of angle change
+        angle_cosines = np.sum(norm_vectors[:-1] * norm_vectors[1:], axis=1)
+        
+        # Score is a mix of distance variation and angle variation
+        dist_score = np.std(distances) / np.mean(distances)
+        angle_score = np.mean(1 - angle_cosines) # smaller angle change is better
+        
+        score = dist_score + angle_score * consistency_weight
+        
+        if score < min_score:
+            min_score = score
+            best_row = row_local_indices
+
+    # visualise all rows in opencv window and highlight the best row if it exists
+    if visualize:
+        cv2.namedWindow("Best Row Visualization", cv2.WINDOW_NORMAL)
+        # Create an empty canvas sized to include all pool points
+        h = int(np.max(pool_coords[:,1])) + 50
+        w = int(np.max(pool_coords[:,0])) + 50
+        vis_img = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # Generate a distinct color for each candidate row using HSV hues
+        num_rows = len(found_rows)
+        row_colors = []
+        for i in range(num_rows):
+            hue = int(180.0 * i / max(1, num_rows-1))  # spread hues 0–180
+            hsv = np.uint8([[[hue, 255, 255]]])
+            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]
+            row_colors.append((int(bgr[0]), int(bgr[1]), int(bgr[2])))
+
+        # Draw each row in its unique color
+        for i, row_indices in enumerate(found_rows):
+            color = row_colors[i]
+            # draw points
+            for idx in row_indices:
+                pt = tuple(pool_coords[idx].astype(int))
+                cv2.circle(vis_img, pt, 4, color, -1)
+            # connect in sequence
+            pts = [tuple(pool_coords[idx].astype(int)) for idx in row_indices]
+            for j in range(len(pts) - 1):
+                cv2.line(vis_img, pts[j], pts[j+1], color, 1)
+
+        # Highlight the best row in red on top
+        for idx in best_row:
+            pt = tuple(pool_coords[idx].astype(int))
+            cv2.circle(vis_img, pt, 6, (0, 0, 255), 2)
+
+        cv2.imshow("Best Row Visualization", vis_img)
         cv2.waitKey(0)
-        cv2.destroyWindow(win_name)
 
-    print("Auto-find corners: Successfully found four corners.")
-    return corner_indices
+    return pool_indices[best_row]
+
+
+# This function is unchanged. It uses the window created by the main controller.
+def _propagate_grid_asymmetric(
+    row0_indices: np.ndarray,
+    all_coords: np.ndarray,
+    kdtree_all: KDTree,
+    available_mask: np.ndarray,
+    pattern_size: Tuple[int, int],
+    visualize: bool = False,
+    vis_img_base: Optional[np.ndarray] = None
+) -> Optional[np.ndarray]:
+    """
+    Propagates a grid assuming an asymmetric (hexagonal/staggered) layout.
+    """
+    num_cols, num_rows = pattern_size
+    grid = np.full((num_rows, num_cols), -1, dtype=int)
+    grid[0, :] = row0_indices
+    available_mask[row0_indices] = False
+    
+    vis_img = None
+    if visualize and vis_img_base is not None:
+        vis_img = vis_img_base.copy()
+
+    # --- Step 1: Find the second row robustly ---
+    print("\n--- Stage 2: Finding Second Row (Asymmetric) ---")
+    row1_indices = np.full(num_cols, -1, dtype=int)
+    for c in range(num_cols):
+        p0_idx = grid[0, c]
+        p0_coord = all_coords[p0_idx]
+        
+        # Find nearest neighbor not in the seed row
+        _, neighbor_indices = kdtree_all.query(p0_coord, k=5)
+        best_match = -1
+        for n_idx in neighbor_indices:
+            if available_mask[n_idx]:
+                best_match = n_idx
+                break
+        if best_match == -1:
+            print(f"  [ propagate FAIL ] Could not find a free neighbor for Row 1, Col {c+1}.")
+            return None
+        row1_indices[c] = best_match
+    
+    # Check consistency of Row 1 before accepting
+    row0_vectors = np.diff(all_coords[grid[0, :]], axis=0)
+    row1_vectors = np.diff(all_coords[row1_indices], axis=0)
+    if not np.allclose(np.linalg.norm(row0_vectors, axis=1), np.linalg.norm(row1_vectors, axis=1), rtol=0.3):
+         print("  [ propagate FAIL ] Found second row is not geometrically consistent with the first.")
+         return None
+
+    grid[1, :] = row1_indices
+    available_mask[row1_indices] = False
+    if visualize:
+        for c in range(num_cols):
+            p0_coord = all_coords[grid[0, c]]
+            p1_coord = all_coords[grid[1, c]]
+            cv2.circle(vis_img, tuple(p1_coord.astype(int)), 5, (50, 255, 150), -1)
+            cv2.line(vis_img, tuple(p0_coord.astype(int)), tuple(p1_coord.astype(int)), (50, 255, 150), 1)
+        cv2.imshow("Propagation Debug", vis_img)
+        cv2.waitKey(0)
+
+    # --- Step 2: Determine Stagger Direction ---
+    x_offsets = all_coords[grid[1, :], 0] - all_coords[grid[0, :], 0]
+    avg_x_offset = np.mean(x_offsets)
+    step_dist_x = np.mean(np.abs(row0_vectors[:, 0]))
+    
+    stagger_dir = 0
+    if avg_x_offset > step_dist_x * 0.25: stagger_dir = -1  # Row 1 is shifted right, so P(r,c) depends on P(r-1, c-1)
+    elif avg_x_offset < -step_dist_x * 0.25: stagger_dir = 1 # Row 1 is shifted left, so P(r,c) depends on P(r-1, c+1)
+    print(f"  [ INFO ] Detected stagger direction: {stagger_dir}")
+    if stagger_dir == 0:
+        print("  [ propagate FAIL ] Could not determine clear stagger direction.")
+        return None
+
+    # --- Step 3: Propagate using the Parallelogram Rule ---
+    if visualize: print("\n--- Stage 3: Propagating Full Grid (Asymmetric) ---")
+
+    for r in range(2, num_rows):
+        for c in range(num_cols):
+            # Check for boundary conditions for the stagger index
+            if not (0 <= c + stagger_dir < num_cols):
+                print(f"  [ propagate FAIL ] Stagger calculation out of bounds at Row {r+1}, Col {c+1}.")
+                return None
+                
+            p_ref1 = all_coords[grid[r-1, c]]
+            p_ref2 = all_coords[grid[r-1, c + stagger_dir]]
+            p_ref3 = all_coords[grid[r-2, c + stagger_dir]]
+            
+            # The vector from the previous step in the zig-zag column
+            local_vector = p_ref2 - p_ref3
+            pred_pt = p_ref1 + local_vector
+            
+            search_radius = np.linalg.norm(local_vector) * 0.7
+            
+            if visualize:
+                print(f"  > Searching for Row {r+1}, Col {c+1}/{num_cols}...")
+                step_vis_img = vis_img.copy()
+                # Draw the parallelogram
+                cv2.line(step_vis_img, tuple(p_ref3.astype(int)), tuple(p_ref2.astype(int)), (255,255,0), 2)
+                cv2.line(step_vis_img, tuple(p_ref1.astype(int)), tuple(pred_pt.astype(int)), (255,255,0), 1)
+                cv2.line(step_vis_img, tuple(p_ref2.astype(int)), tuple(pred_pt.astype(int)), (150,150,0), 1)
+                cv2.drawMarker(step_vis_img, tuple(pred_pt.astype(int)), (255,0,255), cv2.MARKER_CROSS, 12, 1)
+                cv2.circle(step_vis_img, tuple(pred_pt.astype(int)), int(search_radius), (255, 0, 255), 1)
+
+            possible_indices = kdtree_all.query_ball_point(pred_pt, r=search_radius)
+            best_match, min_dist = -1, float('inf')
+            for p_idx in possible_indices:
+                if available_mask[p_idx]:
+                    d = np.linalg.norm(all_coords[p_idx] - pred_pt)
+                    if d < min_dist:
+                        min_dist, best_match = d, p_idx
+
+            if best_match == -1:
+                print(f"  [ propagate FAIL ] Could not find match for Row {r+1}, Col {c+1}.")
+                if visualize:
+                    cv2.circle(step_vis_img, tuple(pred_pt.astype(int)), int(search_radius), (0, 0, 255), 2)
+                    cv2.imshow("Propagation Debug", step_vis_img)
+                    cv2.waitKey(0)
+                return None
+            
+            grid[r, c] = best_match
+            available_mask[best_match] = False
+            if visualize:
+                match_coord = all_coords[best_match]
+                cv2.circle(vis_img, tuple(match_coord.astype(int)), 5, (50, 255, 150), -1)
+                cv2.line(vis_img, tuple(p_ref1.astype(int)), tuple(match_coord.astype(int)), (50, 255, 150), 1)
+                cv2.imshow("Propagation Debug", vis_img)
+                cv2.waitKey(50)
+            
+    return all_coords[grid].reshape(num_rows * num_cols, 1, 2)
+
+# --- Main Controller Function (Modified) ---
+def find_grid_adaptive(
+    keypoints: List[cv2.KeyPoint],
+    pattern_size: Tuple[int, int],
+    visualize: bool = False
+) -> Optional[np.ndarray]:
+    """
+    (Docstring is the same as before)
+    """
+    num_cols, num_rows = pattern_size
+    min_points = max(20, num_cols * num_rows // 2)
+    if len(keypoints) < min_points:
+        return None
+
+    all_coords = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+
+    # ... (DBSCAN pre-filtering logic is unchanged) ...
+    from sklearn.neighbors import NearestNeighbors
+    nn = NearestNeighbors(n_neighbors=4).fit(all_coords)
+    distances, _ = nn.kneighbors(all_coords)
+    median_dist = np.median(distances[:, -1])
+    eps = median_dist * 2.0
+    db = DBSCAN(eps=eps, min_samples=5).fit(all_coords)
+    labels = db.labels_
+    unique_labels, counts = np.unique(labels[labels != -1], return_counts=True)
+    if len(counts) == 0: return None
+    main_cluster_label = unique_labels[np.argmax(counts)]
+    pool_mask = (labels == main_cluster_label)
+    pool_indices = np.where(pool_mask)[0]
+    pool_coords = all_coords[pool_indices]
+
+    # Step 1: Find the first, most confident row
+    print("--- Stage 1: Finding Seed Row ---")
+    # Note: _find_best_row_in_pool is unchanged from the previous version
+    row0_indices = _find_best_row_in_pool(pool_coords, pool_indices, num_cols, visualize=visualize)
+    
+    if row0_indices is None:
+        print("  [ FAIL ] Could not find a confident seed row.")
+        return None
+    print(f"  [ OK ] Found seed row with {len(row0_indices)} points.")
+
+    # --- Setup for Visualization ---
+    vis_img_base = None
+    if visualize:
+        # MODIFICATION: Create a named, resizable window before first use.
+        cv2.namedWindow("Propagation Debug", cv2.WINDOW_NORMAL)
+        
+        vis_img_base = np.zeros((int(np.max(all_coords[:,1]))+50, int(np.max(all_coords[:,0]))+50, 3), dtype=np.uint8)
+        # Draw all points faintly
+        for pt in all_coords: cv2.circle(vis_img_base, tuple(pt.astype(int)), 3, (70,70,70), -1)
+        # Draw the candidate pool points
+        for pt in pool_coords: cv2.circle(vis_img_base, tuple(pt.astype(int)), 4, (150,100,0), -1)
+        # Highlight the found seed row
+        for idx in row0_indices:
+            pt = all_coords[idx]
+            cv2.circle(vis_img_base, tuple(pt.astype(int)), 6, (0,200,0), 2)
+        # Connect seed row points
+        for i in range(len(row0_indices) - 1):
+            pt1 = all_coords[row0_indices[i]]
+            pt2 = all_coords[row0_indices[i+1]]
+            cv2.line(vis_img_base, tuple(pt1.astype(int)), tuple(pt2.astype(int)), (0,255,0), 1)
+        cv2.imshow("Propagation Debug", vis_img_base)
+        cv2.waitKey(0)
+
+    # Step 2 & 3: Propagate grid from the seed row
+    kdtree_all = KDTree(all_coords)
+    available_mask = np.ones(len(all_coords), dtype=bool)
+    
+    # Try propagating from the row as found
+    final_grid = _propagate_grid_asymmetric(row0_indices, all_coords, kdtree_all, available_mask.copy(), pattern_size, visualize, vis_img_base)
+    
+    # If that fails, try propagating from the reversed row
+    if final_grid is None:
+        print("\nPropagation failed, trying reversed seed row...")
+        final_grid = _propagate_grid_asymmetric(row0_indices[::-1], all_coords, kdtree_all, available_mask.copy(), pattern_size, visualize, vis_img_base)
+        
+    # ... (Rest of the function for handling failure/success and final visualization is the same) ...
+    # ...
+    if final_grid is None:
+        print("\nGrid propagation failed in both directions.")
+        if visualize: cv2.destroyAllWindows()
+        return None
+
+    print("\nSuccessfully propagated the full grid.")
+    # (final visualization logic)
+    return final_grid
+
 
 
 def _get_four_corners_from_user(
