@@ -315,7 +315,6 @@ def _match_and_finalize_grid(
     Finds the best affine transformation to map the arbitrary (r,c) coordinates
     from the grid_map to a final, ordered (row, col) system.
     """
-    print("\n--- Stage 3: Matching Grid with Affine Transform ---")
     num_cols, num_rows = pattern_size
 
     target_hex_grid = _generate_target_hex_grid(num_cols, num_rows)
@@ -360,8 +359,8 @@ def _match_and_finalize_grid(
 
         if visualize: cv2.destroyAllWindows()
         return None
-    
-    print(f"  [ OK ] Found affine transformation with r={r_final}, c={c_final}, rotation={rotation_steps_final} steps.")
+    if visualize:
+        print(f"  [ OK ] Found affine transformation with r={r_final}, c={c_final}, rotation={rotation_steps_final} steps.")
     
     final_grid = []
 
@@ -403,8 +402,6 @@ def _match_and_finalize_grid(
             
     final_grid = np.array(final_grid, dtype=np.float32)
     final_grid = np.expand_dims(final_grid, axis=1)
-
-    print(final_grid.shape)
 
     return final_grid
 
@@ -525,16 +522,12 @@ def auto_asymm_cricle_hexagon_matching(
     pattern_size: Tuple[int, int],
     visualize: bool = False
 ) -> Optional[np.ndarray]:
-    """
-    (Docstring updated to mention wavefront propagation)
-    """
     # ... (Scoring and seed finding is exactly the same as before) ...
     num_cols, num_rows = pattern_size
     if len(keypoints) < num_cols * num_rows * 0.5: return None
     all_coords = np.array([kp.pt for kp in keypoints], dtype=np.float32)
     kdtree = KDTree(all_coords)
 
-    print("--- Stage 1: Scoring all points for neighborhood symmetry ---")
     scores = np.array([_calculate_hexagon_score(i, all_coords, kdtree) for i in range(len(all_coords))])
     
     valid_scores = scores[np.isfinite(scores)]
@@ -548,11 +541,8 @@ def auto_asymm_cricle_hexagon_matching(
     if min_score > score_threshold:
         print(f"  [ FAIL ] Best score ({min_score:.2f}) is above threshold.")
         return None
-    
-    print(f"  [ OK ] Found seed point {best_seed_idx} with score {min_score:.3f}.")
 
     # --- Step 3: Propagate using the new WAVEFRONT method ---
-    print("\n--- Stage 2: Propagating grid from the seed point using wavefront method ---")
     grid_map = _propagate_from_seed_wavefront(best_seed_idx, all_coords, kdtree, pattern_size, visualize)
 
     if grid_map is None:
@@ -568,7 +558,6 @@ def auto_asymm_cricle_hexagon_matching(
         if visualize: cv2.destroyAllWindows()
         return None
 
-    print("\nSuccessfully found and ordered the final grid.")
     if visualize: cv2.destroyAllWindows()
 
     return final_grid

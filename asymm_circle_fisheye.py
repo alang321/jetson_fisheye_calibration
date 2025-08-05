@@ -259,7 +259,7 @@ def find_grid_in_image(img: np.ndarray, gray: np.ndarray, detector: cv2.SimpleBl
             print("  Assisted serpentine finder successful.")
             return corners
         
-    print("  All finders failed.")
+    print("  No grid found. All enabled finders failed.")
     return None
 
 def run_calibration(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], image_size: Tuple[int, int], filenames: List[str]) -> Optional[Dict[str, Any]]:
@@ -328,8 +328,13 @@ def main():
     objpoints_all, imgpoints_all, filenames_all = [], [], []
     img_shape = None
 
+    rejected = 0
+    accepted = 0
+
     for i, fname in enumerate(image_files):
-        print(f"\n[{i+1}/{len(image_files)}] Processing: {os.path.basename(fname)}")
+        print("\n---------------------------------------------------------")
+        print(f"[{i+1}/{len(image_files)}] Processing: {os.path.basename(fname)}")
+        print("---------------------------------------------------------")
         img_color = cv2.imread(fname)
         if img_color is None:
             print("  Warning: Could not read image.")
@@ -348,7 +353,6 @@ def main():
                 print("  Skipped in debug mode.")
                 continue
         else:
-            print("  Applying CLAHE preprocessing...")
             processed_gray = clahe.apply(gray)
             
         corners = find_grid_in_image(img_color, processed_gray, blob_detector, objp, pattern_size, args)
@@ -371,6 +375,7 @@ def main():
                 key = cv2.waitKey(0) & 0xFF
                 if key == ord('y'):
                     print("  Accepted.")
+                    accepted += 1
                     objpoints_all.append(objp.reshape(-1,1,3))
                     imgpoints_all.append(corners.reshape(-1,1,2))
                     filenames_all.append(fname)
@@ -378,16 +383,26 @@ def main():
                     print("Quitting.")
                     break
                 else:
+                    rejected += 1
                     print("  Rejected.")
                 cv2.destroyWindow('Detection Confirmation')
             else:
                 # auto-accept without prompt
                 print("  Grid found. Auto-accepting (ask_confirm=False).")
+                accepted += 1
                 objpoints_all.append(objp.reshape(-1,1,3))
                 imgpoints_all.append(corners.reshape(-1,1,2))
                 filenames_all.append(fname)
-
+        else:
+            rejected += 1
+            
     cv2.destroyAllWindows()
+
+    print("\n\n ========================================")
+    print(f"  Finished processing {len(image_files)} images.")
+    print(f"  Accepted {accepted} views, rejected {rejected} views.")
+    print(f"  Total valid views for calibration: {len(objpoints_all)}")
+    print(" ========================================\n")
 
     if len(objpoints_all) < MIN_IMAGES_FOR_CALIB:
         print(f"\nError: Insufficient views for calibration. Found {len(objpoints_all)}, need {MIN_IMAGES_FOR_CALIB}.")
