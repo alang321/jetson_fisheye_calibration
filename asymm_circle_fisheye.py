@@ -110,6 +110,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--ext', type=str, nargs='+', default=['jpg', 'png'], help='Image file extensions (default: jpg png)')
     parser.add_argument('--no_confirm', action='store_true', dest='no_confirm', help='Do not ask for confirmation before accepting detected grids.')
     parser.add_argument('--no_manual_backup', action='store_true', dest='no_manual_backup', help='Do not save a backup of the original images.')
+    parser.add_argument('--try_recover_missing', action='store_true', dest='try_recover_missing', help='Attempt to recover missing grid points during hex search.')
     parser.add_argument('--debug', action='store_true', help='Run in interactive debug mode to tune blob detector parameters.')
     parser.add_argument('--visualize_serpentine', action='store_true', help='Visualize serpentine grid detection.')
     parser.add_argument('--visualize_hex_grid', action='store_true', help='Visualize hexagonal auto grid detection.')
@@ -246,7 +247,8 @@ def find_grid_in_image(img: np.ndarray, gray: np.ndarray, detector: cv2.SimpleBl
         return None
     
     print("  findCirclesGrid failed. Trying custom hexagonal finder...")
-    corners = auto_asymm_cricle_hexagon_matching(img, keypoints, pattern_size, visualize=args.visualize_hex_grid)
+    try_recovery = args.try_recover_missing
+    corners = auto_asymm_cricle_hexagon_matching(img, keypoints, pattern_size, try_recovery=try_recovery, visualize=args.visualize_hex_grid)
     if corners is not None:
         print("  Hexagonal auto-finder successful.")
         return corners

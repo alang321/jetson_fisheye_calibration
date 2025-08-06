@@ -300,12 +300,43 @@ def _translate_hex_grid(
 
     return translated_points
 
+def _transform_grid_map(
+    grid_map: Dict[Tuple[int, int], int],
+    r_offset: int,
+    c_offset: int,
+    rotation_steps: int
+) -> Dict[Tuple[int, int], int]:
+    transformed_map = {}
+
+    for (r, c) in grid_map.keys():
+        idx = grid_map[(r, c)]
+        # Translate the grid point to the new origin
+        translated_r = r - r_offset
+        translated_c = c - c_offset
+
+        x = translated_r
+        z = translated_c
+        y = -x - z
+
+        # 2. Perform rotation by shuffling cube coordinates
+        # A 60-degree clockwise rotation is equivalent to shifting the cube coordinates.
+        for _ in range(rotation_steps):
+            x, y, z = -z, -x, -y
+        
+        # 3. Convert back from cube to axial coordinates for the output
+        new_r = x
+        new_c = z
+        transformed_map[(new_r, new_c)] = idx
+
+    return transformed_map
+
 def _match_and_finalize_grid(
     grid_map: Dict[Tuple[int, int], int],
     all_coords: np.ndarray,
     pattern_size: Tuple[int, int],
     visualize: bool = False,
-    max_window_dim: int = 1200
+    try_recovery: bool = False,
+    img_colors: np.ndarray = None
 ) -> Optional[np.ndarray]:
     """
     Finds the best affine transformation to map the arbitrary (r,c) coordinates
@@ -318,8 +349,9 @@ def _match_and_finalize_grid(
     hex_grid = set(grid_map.keys())
 
     # Iterate through every point as a potential anchor for the transformation
-    r_final, c_final = None, None
-    rotation_steps_final = -1
+    min_remainder = float('inf')
+    best_r, best_c = None, None
+    best_rotation = -1
 
     for r_start, c_start in hex_grid:
         # move hex grid so that the current point is at (0, 0)
@@ -332,16 +364,47 @@ def _match_and_finalize_grid(
 
         for rotation_steps in range(6):
             # Calculate the coverage of the rotated grid against the ideal hex grid
-            if target_hex_grid.issubset(rotated_grids[rotation_steps]):
-                # If the rotated grid covers the ideal grid, we can calculate the affine transform
-                r_final, c_final = r_start, c_start
-                rotation_steps_final = rotation_steps
-                break
+            remainder = target_hex_grid - rotated_grids[rotation_steps]
+            
+            if len(remainder) < min_remainder:
+                min_remainder = len(remainder)
+                best_r, best_c = r_start, c_start
+                best_rotation = rotation_steps
+
+    # transform grid map with the found affine transformation
+    new_grid_map = _transform_grid_map(
+        grid_map,
+        r_offset=best_r,
+        c_offset=best_c,
+        rotation_steps=best_rotation
+    )
+
+    new_hex_grid = set(new_grid_map.keys())
+
+    if 0 < min_remainder <= 3 and try_recovery:
+        print(f"  [ INFO ] Found a near-complete affine transformation with {min_remainder} missing points. Attempting to recover missing points...")
+        new_grid_map, all_coords, success = _recover_missing_points(
+            new_hex_grid,
+            new_grid_map,
+            target_hex_grid,
+            all_coords,
+            img_colors=img_colors,
+            visualize=visualize
+        )
+
+        if not success:
+            print("  [ FAIL ] Could not recover missing points.")
+            return None
+        else:
+            print(f"  [ OK ] Successfully recovered {len(new_grid_map)} points after recovery.")
+            min_remainder = 0
+    elif min_remainder > 0 and not try_recovery:
+        print(f"  [ WARN ] Found an affine transformation with {min_remainder} missing points, but recovery is disabled. Skipping recovery.")
+        return None
 
     # build the final grid with the found coordinates
-    if r_final is None or c_final is None:
+    if min_remainder != 0:
         print("  [ FAIL ] No valid affine transformation found that covers the ideal grid.")
-
 
         rotated_hex_grids = [rotate_hex_grid(hex_grid, i) for i in range(6)]
 
@@ -356,31 +419,9 @@ def _match_and_finalize_grid(
         if visualize: cv2.destroyAllWindows()
         return None
     if visualize:
-        print(f"  [ OK ] Found affine transformation with r={r_final}, c={c_final}, rotation={rotation_steps_final} steps.")
-    
+        print(f"  [ OK ] Found affine transformation with r={best_r}, c={best_c}, rotation={best_rotation} steps.")
+
     final_grid = []
-
-    # transform grid map with the found affine transformation
-    new_grid_map = {}
-    for (r, c) in grid_map.keys():
-        idx = grid_map[(r, c)]
-        # Translate the grid point to the new origin
-        translated_r = r - r_final
-        translated_c = c - c_final
-
-        x = translated_r
-        z = translated_c
-        y = -x - z
-
-        # 2. Perform rotation by shuffling cube coordinates
-        # A 60-degree clockwise rotation is equivalent to shifting the cube coordinates.
-        for _ in range(rotation_steps_final):
-            x, y, z = -z, -x, -y
-        
-        # 3. Convert back from cube to axial coordinates for the output
-        new_r = x
-        new_c = z
-        new_grid_map[(new_r, new_c)] = idx
 
     for i in range(num_rows):
         for j in range(num_cols):
@@ -400,6 +441,196 @@ def _match_and_finalize_grid(
     final_grid = np.expand_dims(final_grid, axis=1)
 
     return final_grid
+
+def _recover_missing_points(
+    best_hex_grid: Set[Tuple[int, int]],
+    best_grid_map: Dict[Tuple[int, int], int],
+    target_hex_grid,
+    all_coords: np.ndarray,
+    img_colors: np.ndarray,
+    visualize: bool = False,
+) -> Tuple[Optional[Dict[Tuple[int, int], int]], bool]:
+        # highlight expected missing points
+        hex_grid_best = best_hex_grid.copy()
+        all_coords = all_coords.copy()
+
+        missing_points = target_hex_grid - hex_grid_best
+        missing_points = list(missing_points)
+
+        # predict the missing points by finding the immediate grid neighbors
+        missing_point_neighbors = []
+
+        new_grid_map = best_grid_map.copy()
+
+        # find in what direction there are valid neighbors for each missing point
+        directions = [(-1, 0), (-1, 1), (0, 1), (1, 0), (1, -1), (0, -1)]  # Hexagonal direction vectors
+        for r, c in missing_points:
+            missing_point_neighbors.append([])
+            for dir_r, dir_c in directions:
+                neighbor_r = r + dir_r
+                neighbor_c = c + dir_c
+                if (neighbor_r, neighbor_c) in new_grid_map:
+                    idx = new_grid_map[(neighbor_r, neighbor_c)]
+                    missing_point_neighbors[-1].append((dir_r, dir_c))
+
+        # if each missing point has atleast 1 valid neighbors we try to recover it
+        recovered_points = []
+        point_distances = [] # cor cropping region size
+        for i, (r, c) in enumerate(missing_points):
+            if len(missing_point_neighbors[i]) < 1:
+                print(f"  [ WARN ] Not enough neighbors to recover missing point ({r}, {c}). Skipping.")
+                return None
+
+            # Calculate the predicted position of the missing point from each neighbor
+            predicted_coords = []
+            distances = []
+            valid_neighbors = 0
+            for (dir_r, dir_c) in missing_point_neighbors[i]:
+                neighbor_r = r + dir_r
+                neighbor_c = c + dir_c
+
+                next_r = r + dir_r * 2
+                next_c = c + dir_c * 2
+
+                if (next_r, next_c) in new_grid_map:
+                    idx_next = new_grid_map[(next_r, next_c)]
+                    idx_neighbor = new_grid_map[(neighbor_r, neighbor_c)]
+                    vec = all_coords[idx_neighbor] - all_coords[idx_next]
+                    predicted_pt = all_coords[idx_neighbor] + vec
+                    predicted_coords.append(predicted_pt)
+                    valid_neighbors += 1
+                    distances.append(np.linalg.norm(vec))
+
+            if valid_neighbors == 0:
+                print(f"  [ WARN ] No valid neighbors found for missing point ({r}, {c}). Skipping recovery.")
+                return None
+
+            point_distances.append(np.mean(np.array(distances)))
+            predicted_coords = np.array(predicted_coords)
+            avg_coord = np.mean(predicted_coords, axis=0)
+            recovered_points.append(avg_coord)
+
+        # take a crop of the region around the recovered point and try to detect the missed blob
+        for i in range(len(recovered_points)):
+            crop_size = int(point_distances[i])
+            if crop_size < 10: crop_size = 10
+
+            x_start = max(0, int(recovered_points[i][0] - crop_size))
+            x_end = min(img_colors.shape[1], int(recovered_points[i][0] + crop_size))
+            y_start = max(0, int(recovered_points[i][1] - crop_size))
+            y_end = min(img_colors.shape[0], int(recovered_points[i][1] + crop_size))
+
+            # Crop the image and try to detect the missed blob
+            img_crop = img_colors[y_start:y_end, x_start:x_end]
+            if img_crop.size == 0:
+                print(f"  [ WARN ] Cropped image is empty for recovered point ({recovered_points[i]}). Skipping.")
+                return None
+
+            # make image binary with adaptive thresholding
+            gray_crop = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
+
+            #boost contrat and brightness
+            gray_crop = cv2.normalize(gray_crop, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+
+            # now clahe
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            clahe_crop = clahe.apply(gray_crop)
+
+            # The predicted point location within the crop
+            predicted_pt_local = np.array([int(recovered_points[i][0]) - x_start,
+                                        int(recovered_points[i][1]) - y_start])
+
+            min_dist = float('inf')
+            best_blob_centroid = None
+
+            # We can estimate a plausible area range from the average blob size
+            # This is a placeholder; a more robust way is to calculate this from the initial keypoints.
+            avg_blob_area = (point_distances[i] * 0.1)**2 * np.pi 
+            min_area = avg_blob_area * 0.1
+            max_area = avg_blob_area * 1.5
+
+            params = cv2.SimpleBlobDetector_Params()
+            params.filterByArea = True
+            params.minArea = min_area
+            params.maxArea = max_area
+            params.filterByCircularity = True
+            params.minCircularity = 0.4
+
+            blob_detector = cv2.SimpleBlobDetector_create(params)
+            keypoints = blob_detector.detect(clahe_crop)
+            blob_centroids = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+
+            # 3. Iterate through detected blobs (start from label 1 to skip the background)
+            for centroid in blob_centroids:
+                # Calculate the distance from the predicted point to the blob centroid
+                dist = np.linalg.norm(centroid - predicted_pt_local)
+
+                if dist < min_dist:
+                    min_dist = dist
+                    best_blob_centroid = centroid
+
+            if best_blob_centroid is not None and min_dist < point_distances[i] * 0.3:  # Allow some tolerance
+                # 7. Convert the local centroid back to global image coordinates
+                final_recovered_coord = best_blob_centroid + np.array([x_start, y_start])
+                recovered_points[i] = final_recovered_coord
+
+                all_coords = np.vstack((all_coords, final_recovered_coord))
+                new_grid_map[missing_points[i]] = len(all_coords) - 1
+                
+                # Update visualization to be more informative
+                if visualize:
+                    binary_crop_rgb = cv2.cvtColor(clahe_crop, cv2.COLOR_GRAY2BGR)
+                    # Draw predicted point (Red Cross)
+                    cv2.drawMarker(binary_crop_rgb, tuple(predicted_pt_local.astype(int)), (0, 0, 255), 
+                                markerType=cv2.MARKER_CROSS, markerSize=10, thickness=1)
+                    # Draw found centroid (Green Circle)
+                    cv2.circle(binary_crop_rgb, tuple(best_blob_centroid.astype(int)), 3, (0, 255, 0), -1)
+
+                    # draw distance threshold
+                    cv2.circle(binary_crop_rgb, tuple(predicted_pt_local.astype(int)), int(point_distances[i] * 0.3), (255, 0, 0), 1)
+
+                    cv2.imshow(f"Recovery Analysis {i+1}", binary_crop_rgb)
+                    cv2.waitKey(0)
+            else:
+                print(f"  [ FAIL ] No suitable blob found for recovered point ({recovered_points[i]}). Skipping.")
+                return None, None, False
+
+        if visualize:
+            print("  [ INFO ] Visualizing missing points...")
+            vis_img = np.ones((600, 800, 3), dtype=np.uint8) * 255
+            
+            # Draw the ideal grid
+            for r, c in target_hex_grid:
+                cv2.circle(vis_img, (int(c * 20 + 400), int(r * 20 + 300)), 5, (0, 255, 0), -1)
+
+            # Draw the found hex grid
+            for r, c in hex_grid_best:
+                cv2.circle(vis_img, (int(c * 20 + 400), int(r * 20 + 300)), 5, (255, 0, 0), -1)
+
+            # Draw the missing points
+            for r, c in missing_points:
+                cv2.circle(vis_img, (int(c * 20 + 400), int(r * 20 + 300)), 5, (0, 0, 255), -1)
+
+            cv2.imshow("Missing Points Visualization", vis_img)
+            cv2.waitKey(0)
+
+            #after fixing
+            missing_points2 = target_hex_grid - set(new_grid_map.keys())
+
+            # draw points on the original image
+            vis_img = img_colors.copy()
+
+            # draw all coords as red circles
+            for pt in all_coords:
+                cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 4, (0, 0, 255), -1)
+
+            for pt in recovered_points:
+                cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 1, (255, 0, 0), -1)
+
+            cv2.imshow("Recovered Points", vis_img)
+            cv2.waitKey(0)
+
+        return new_grid_map, all_coords, True
 
 def _draw_hex_grids(
         *grid_point_sets: Set[Tuple[int, int]],
@@ -517,6 +748,8 @@ def auto_asymm_cricle_hexagon_matching(
     img: np.ndarray,
     keypoints: List[cv2.KeyPoint],
     pattern_size: Tuple[int, int],
+    try_recovery: bool = False,
+    num_seed_candidates: int = 3,
     visualize: bool = False
 ) -> Optional[np.ndarray]:
     
@@ -527,35 +760,45 @@ def auto_asymm_cricle_hexagon_matching(
     kdtree = KDTree(all_coords)
 
     scores = np.array([_calculate_hexagon_score(i, all_coords, kdtree) for i in range(len(all_coords))])
+    valid_scores_mask = np.isfinite(scores)
+    if not np.any(valid_scores_mask):
+        print("  [ FAIL ] No valid hexagons could be scored.")
+        return None
     
-    valid_scores = scores[np.isfinite(scores)]
-    if len(valid_scores) == 0: return None
+    # Get indices of all points, sorted by their score (best to worst)
+    sorted_candidate_indices = np.argsort(scores)
 
-    best_seed_idx = np.argmin(scores)
-    min_score = scores[best_seed_idx]
+    # Filter out the infinite-score indices
+    sorted_candidate_indices = [idx for idx in sorted_candidate_indices if np.isfinite(scores[idx])]
 
-
-    score_threshold = 2.0 
-    if min_score > score_threshold:
-        print(f"  [ FAIL ] Best score ({min_score:.2f}) is above threshold.")
-        return None
-
-    # --- Step 3: Propagate using the new WAVEFRONT method ---
-    grid_map = _propagate_from_seed_wavefront(img, best_seed_idx, all_coords, kdtree, pattern_size, visualize)
-
-    if grid_map is None:
-        print("  [ FAIL ] Grid propagation from seed point failed.")
-        if visualize: cv2.destroyAllWindows()
-        return None
-
-    # --- NEW: Call the matching and finalization function ---
-    final_grid = _match_and_finalize_grid(grid_map, all_coords, pattern_size, visualize)
+    # Use a score threshold to prune bad candidates early
+    score_threshold = np.median(scores[valid_scores_mask]) + 2 * np.std(scores[valid_scores_mask])
     
-    if final_grid is None:
-        print("  [ FAIL ] Could not match the found points to the ideal grid pattern.")
-        if visualize: cv2.destroyAllWindows()
-        return None
+    for i, seed_idx in enumerate(sorted_candidate_indices[:num_seed_candidates]):
+        
+        # Check if the candidate's score is within a reasonable threshold
+        if scores[seed_idx] > score_threshold:
+            print(f"  [ SKIP ] Candidate {i+1} score ({scores[seed_idx]:.3f}) exceeds threshold. Stopping search.")
+            break
 
+        print(f"\n- Attempt {i+1}/{num_seed_candidates} with seed index {seed_idx} (score: {scores[seed_idx]:.3f})")
+        
+        # Propagate the grid from the current seed
+        grid_map = _propagate_from_seed_wavefront(img, seed_idx, all_coords, kdtree, pattern_size, visualize=visualize)
+
+        if grid_map is None:
+            print("  [ FAIL ] Grid propagation failed.")
+            continue
+
+        # Match, finalize, and recover missing points
+        final_grid = _match_and_finalize_grid(grid_map, all_coords, pattern_size, try_recovery=try_recovery, visualize=visualize, img_colors=img)
+
+        if final_grid is not None:
+            if visualize: cv2.destroyAllWindows()
+            return final_grid
+        else:
+            print("  [ FAIL ] Could not finalize grid from this seed.")
+
+    print("\n--- FAILED: Exhausted all high-quality seed candidates without success. ---")
     if visualize: cv2.destroyAllWindows()
-
-    return final_grid
+    return None
