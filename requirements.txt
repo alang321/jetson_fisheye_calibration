@@ -9,3 +9,4 @@ numpy
 # not strictly required if *only* using cv2.VideoCapture with GStreamer backend.
 # NOTE: Installation often requires system packages (see below).
 PyGObject
+scikit-learn
