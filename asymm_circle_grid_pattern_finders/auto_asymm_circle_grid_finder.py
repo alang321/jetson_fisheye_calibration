@@ -65,26 +65,25 @@ def _propagate_from_seed_wavefront(
     sorted_neighbor_indices = neighbor_indices[np.argsort(angles)]
 
     grid_map: Dict[Tuple[int, int], int] = {(0, 0): seed_idx}
-    queue = collections.deque([((0, 0), seed_idx)])
+    queue = collections.deque()
     visited_original_indices = {seed_idx}
 
     seed_v_row = all_coords[sorted_neighbor_indices[3]] - seed_coord # (1, 0)
-    seed_v_row_m = all_coords[sorted_neighbor_indices[0]] - seed_coord # (-1, 0)
     seed_v_col = all_coords[sorted_neighbor_indices[2]] - seed_coord # (0, 1)
-    seed_v_col_m = all_coords[sorted_neighbor_indices[5]] - seed_coord # (0, -1)
-    seed_v_diag = all_coords[sorted_neighbor_indices[1]] - seed_coord # (-1, 1)
-    seed_v_diag_m = all_coords[sorted_neighbor_indices[4]] - seed_coord # (1, -1)
 
-    local_direction_vectors = {seed_idx: np.array([seed_v_row, seed_v_diag, seed_v_col, seed_v_row_m, seed_v_diag_m, seed_v_col_m])} # direction vectors for the seed point, last item is a boolean indicating if the vectors are already updated or a propagated guess
-    direction_vectors_index_increments = [(1, 0), (-1, 1), (0, 1), (-1, 0), (1, -1), (0, -1)] # (r,c) increments for the 6 hexagonal directions
-
-    # definition if direction vector is not yet known
-    unknown_direction_vector = np.array([np.nan, np.nan], dtype=np.float32)
-    unknown_direction_vectors = np.array([unknown_direction_vector] * 6, dtype=np.float32) # Placeholder for unknown vectors
+    direction_vectors_index_increments = [(-1, 0), (-1, 1), (0, 1), (1, 0), (1, -1), (0, -1)] # (r,c) increments for the 6 hexagonal directions
 
     # hexagon opposite side mapping
     # This is used to find the opposite side of the hexagon for the parallelogram
     opposite_side_idx_map = {0: 3, 1: 4, 2: 5, 3: 0, 4: 1, 5: 2}
+
+    # add the 6 intial known neibhourgs to the map and queue
+    for i in range(6):
+        grid_pos = (direction_vectors_index_increments[i][0], direction_vectors_index_increments[i][1])
+        if grid_pos not in grid_map:
+            grid_map[grid_pos] = sorted_neighbor_indices[i]
+            visited_original_indices.add(sorted_neighbor_indices[i])
+            queue.append((grid_pos, sorted_neighbor_indices[i]))
 
     # --- Visualization Setup ---
     vis_img = None
@@ -102,6 +101,13 @@ def _propagate_from_seed_wavefront(
         aspect_ratio = w / h
         win_w = min(w, max_window_dim); win_h = int(win_w / aspect_ratio)
         cv2.resizeWindow(WIN_NAME, win_w, win_h)
+
+        # connect originnal seed points in red
+        for idx in sorted_neighbor_indices:
+            pt = all_coords[idx]
+            next_pt = all_coords[sorted_neighbor_indices[(sorted_neighbor_indices.tolist().index(idx) + 1) % 6]]
+            cv2.line(vis_img, tuple(pt.astype(int)), tuple(next_pt.astype(int)), (0, 0, 255), 2)
+            cv2.line(vis_img, tuple(pt.astype(int)), tuple(seed_coord.astype(int)), (0, 0, 255), 2)
 
         # draw the row and column vectors
         cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_row).astype(int)), (255, 0, 0), 5, tipLength=0.2)
@@ -128,15 +134,15 @@ def _propagate_from_seed_wavefront(
 
         for i in range(6):
             prediction_grid_pos = (r + direction_vectors_index_increments[i][0], c + direction_vectors_index_increments[i][1])
-            prediction_vector = local_direction_vectors[p_idx][i]
 
-            if np.isnan(prediction_vector).any():
-                # see if the opposite side is already known
-                opposite_side_idx = opposite_side_idx_map[i]
-                if not np.isnan(local_direction_vectors[p_idx][opposite_side_idx]).any():
-                    prediction_vector = -local_direction_vectors[p_idx][opposite_side_idx].copy()
-                else:
-                    continue
+            # get the local direction vector for the current point
+            opposite_side_known_grid_pos = (r + direction_vectors_index_increments[opposite_side_idx_map[i]][0], c + direction_vectors_index_increments[opposite_side_idx_map[i]][1]) 
+            if opposite_side_known_grid_pos in grid_map:
+                prediction_vector = p_coord - all_coords[grid_map[opposite_side_known_grid_pos]]
+            else:
+                #if visualize:
+                #    print(f"  [ WARN ] No known opposite side for point ({r}, {c}) in direction {i}. Skipping propagation.")
+                continue
 
             pred_coord = p_coord + prediction_vector
 
@@ -157,9 +163,7 @@ def _propagate_from_seed_wavefront(
                     q_coord = all_coords[q_idx]
                     cv2.circle(step_vis_img, tuple(q_coord.astype(int)), 10, (255,0,255), 3)
 
-                # draw all known local direction vectors for current point
-                f = opposite_side_idx_map[i]
-                target_coord = p_coord + local_direction_vectors[p_idx][f]
+                target_coord = p_coord - prediction_vector
                 cv2.arrowedLine(step_vis_img, tuple(target_coord.astype(int)), tuple(p_coord.astype(int)), (255,0,255), 3, tipLength=0.2)
             
             possible_indices = kdtree.query_ball_point(pred_coord, r=search_radius)
@@ -179,18 +183,11 @@ def _propagate_from_seed_wavefront(
                 if visualize:
                     cv2.circle(vis_img, tuple(all_coords[best_match].astype(int)), 5, (0,255,0), -1)
 
-                # give an initial guess for the new point's vectors
-                local_direction_vectors[best_match] = unknown_direction_vectors.copy()
+                    for j in range(6):
+                        grid_pos_query = (prediction_grid_pos[0] + direction_vectors_index_increments[j][0], prediction_grid_pos[1] + direction_vectors_index_increments[j][1])
 
-                for j in range(6):
-                    grid_pos_query = (prediction_grid_pos[0] + direction_vectors_index_increments[j][0], prediction_grid_pos[1] + direction_vectors_index_increments[j][1])
-
-                    if grid_pos_query in grid_map:
-                        local_direction_vectors[best_match][j] = all_coords[grid_map[grid_pos_query]] - all_coords[best_match]
-                        local_direction_vectors[grid_map[grid_pos_query]][opposite_side_idx_map[j]] = -local_direction_vectors[best_match][j].copy()
-
-                        if visualize:
-                            cv2.line(vis_img, tuple(all_coords[best_match].astype(int)), tuple(all_coords[grid_map[grid_pos_query]].astype(int)), (0,255,0), 2)
+                        if grid_pos_query in grid_map:
+                                cv2.line(vis_img, tuple(all_coords[best_match].astype(int)), tuple(all_coords[grid_map[grid_pos_query]].astype(int)), (0,255,0), 2)
 
             if visualize:
                 cv2.imshow(WIN_NAME, step_vis_img)
