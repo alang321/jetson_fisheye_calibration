@@ -147,9 +147,10 @@ def _propagate_from_seed_wavefront(
 
             if visualize:
                 step_vis_img = vis_img.copy()
-                cv2.circle(step_vis_img, tuple(p_coord.astype(int)), 10, (255,255,255), 4)
-                cv2.drawMarker(step_vis_img, tuple(pred_coord.astype(int)), (0,255,255), cv2.MARKER_CROSS, 12, 1)
-                cv2.circle(step_vis_img, tuple(pred_coord.astype(int)), int(search_radius), (0, 200, 200), 1)
+                cv2.circle(step_vis_img, tuple(p_coord.astype(int)), 10, (255,0,0), 4)
+                cv2.drawMarker(step_vis_img, tuple(pred_coord.astype(int)), (255,0,0), cv2.MARKER_CROSS, 12, 2)
+                cv2.circle(step_vis_img, tuple(pred_coord.astype(int)), int(search_radius), (255, 0, 0), 2)
+                cv2.line(step_vis_img, tuple(p_coord.astype(int)), tuple(pred_coord.astype(int)), (255, 0, 0), 2)
 
                 #draw all queued points in pink
                 for (qr, qc), q_idx in queue:
@@ -157,10 +158,9 @@ def _propagate_from_seed_wavefront(
                     cv2.circle(step_vis_img, tuple(q_coord.astype(int)), 10, (255,0,255), 3)
 
                 # draw all known local direction vectors for current point
-                for j in range(6):
-                    if not np.isnan(local_direction_vectors[p_idx][j]).any():
-                        target_coord = p_coord + local_direction_vectors[p_idx][j]
-                        cv2.arrowedLine(step_vis_img, tuple(p_coord.astype(int)), tuple(target_coord.astype(int)), (255,0,255), 3, tipLength=0.2)
+                f = opposite_side_idx_map[i]
+                target_coord = p_coord + local_direction_vectors[p_idx][f]
+                cv2.arrowedLine(step_vis_img, tuple(target_coord.astype(int)), tuple(p_coord.astype(int)), (255,0,255), 3, tipLength=0.2)
             
             possible_indices = kdtree.query_ball_point(pred_coord, r=search_radius)
             best_match, min_dist = -1, float('inf')
