@@ -112,8 +112,6 @@ def _propagate_from_seed_wavefront(
         cv2.putText(vis_img, "Col Vector", tuple((seed_coord + seed_v_col * 0.5).astype(int)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
 
-        cv2.imshow(WIN_NAME, vis_img)
-        cv2.waitKey(0)
         is_paused = True
 
     # --- Main Propagation Loop ---
@@ -523,56 +521,6 @@ def auto_asymm_cricle_hexagon_matching(
     visualize: bool = False
 ) -> Optional[np.ndarray]:
     
-    # add manual points by clicking for debugging
-    if visualize:   
-        print("\n--- Stage 1: Manual Point Selection (Optional) ---")
-        print("  - Click on the image to select points, press 'q' to finish.")
-        print("  - Press 'p' to pause/resume visualization.")
-        
-        # Create a dummy image for visualization
-        min_x = min(kp.pt[0] for kp in keypoints)
-        min_y = min(kp.pt[1] for kp in keypoints)
-        max_x = max(kp.pt[0] for kp in keypoints)
-        max_y = max(kp.pt[1] for kp in keypoints)
-        width = int(max_x - min_x + 50)
-        height = int(max_y - min_y + 50)
-        vis_img = np.zeros((height, width, 3), dtype=np.uint8)
-
-        for kp in keypoints:
-            pt = (int(kp.pt[0] - min_x + 25), int(kp.pt[1] - min_y + 25))
-            cv2.circle(vis_img, pt, 3, (70, 70, 70), -1)
-
-    cv2.imshow("Manual Point Addition", vis_img)
-    cv2.namedWindow("Manual Point Addition", cv2.WINDOW_NORMAL)
-    h, w, _ = vis_img.shape
-    aspect_ratio = w / h
-    win_w = min(w, 1200); win_h = int(win_w / aspect_ratio)
-    cv2.resizeWindow("Manual Point Addition", win_w, win_h)
-    manual_points = []
-    while True:
-        if visualize:
-            cv2.imshow("Manual Point Addition", vis_img)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 'y':
-                break
-            # Wait for mouse click to add points
-            def mouse_callback(event, x, y, flags, param):
-                if event == cv2.EVENT_LBUTTONDOWN:
-                    pt = (x - 25 + min_x, y - 25 + min_y)
-                    manual_points.append(pt)
-                    cv2.circle(vis_img, (x, y), 5, (0, 255, 0), -1)
-                    cv2.imshow("Manual Point Addition", vis_img)
-
-            cv2.setMouseCallback("Manual Point Addition", mouse_callback)
-            cv2.waitKey(1)  # Allow the window to process events
-
-    cv2.setMouseCallback("Manual Point Addition", lambda *_, **__: None)  # Disable mouse callback
-    if visualize:
-        cv2.destroyWindow("Manual Point Addition")
-
-        # Ensure we concatenate two lists, not a list and a tuple
-        keypoints = [cv2.KeyPoint(pt[0], pt[1], 1) for pt in manual_points] + list(keypoints)
-
     # ... (Scoring and seed finding is exactly the same as before) ...
     num_cols, num_rows = pattern_size
     if len(keypoints) < num_cols * num_rows * 0.5: return None
