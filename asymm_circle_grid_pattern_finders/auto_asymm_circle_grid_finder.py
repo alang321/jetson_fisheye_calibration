@@ -45,6 +45,7 @@ def _calculate_hexagon_score(
     return final_score
 
 def _propagate_from_seed_wavefront(
+    img: np.ndarray,
     seed_idx: int,
     all_coords: np.ndarray,
     kdtree: KDTree,
@@ -91,8 +92,8 @@ def _propagate_from_seed_wavefront(
         print("\n--- Stage 2: Propagating Grid (Animated) ---")
         print("  - Controls: Press 'p' to pause/play, 'q' to skip.")
         
-        vis_img = np.zeros((int(np.max(all_coords[:,1]))+50, int(np.max(all_coords[:,0]))+50, 3), dtype=np.uint8)
-        for pt in all_coords: cv2.circle(vis_img, tuple(pt.astype(int)), 3, (70,70,70), -1)
+        vis_img = img.copy()
+        for pt in all_coords: cv2.circle(vis_img, tuple(pt.astype(int)), 3, (0,0,255), -1)
         cv2.circle(vis_img, tuple(seed_coord.astype(int)), 6, (0,255,0), -1)
 
         WIN_NAME = "Propagation Animator"
@@ -103,8 +104,8 @@ def _propagate_from_seed_wavefront(
         cv2.resizeWindow(WIN_NAME, win_w, win_h)
 
         # draw the row and column vectors
-        cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_row).astype(int)), (255, 0, 0), 2, tipLength=0.2)
-        cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_col).astype(int)), (0, 0, 255), 2, tipLength=0.2)
+        cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_row).astype(int)), (255, 0, 0), 5, tipLength=0.2)
+        cv2.arrowedLine(vis_img, tuple(seed_coord.astype(int)), tuple((seed_coord + seed_v_col).astype(int)), (0, 0, 255), 5, tipLength=0.2)
 
         #label them
         cv2.putText(vis_img, "Row Vector", tuple((seed_coord + seed_v_row * 0.5).astype(int)),
@@ -159,7 +160,7 @@ def _propagate_from_seed_wavefront(
                 for j in range(6):
                     if not np.isnan(local_direction_vectors[p_idx][j]).any():
                         target_coord = p_coord + local_direction_vectors[p_idx][j]
-                        cv2.arrowedLine(step_vis_img, tuple(p_coord.astype(int)), tuple(target_coord.astype(int)), (255,0,255), 1, tipLength=0.2)
+                        cv2.arrowedLine(step_vis_img, tuple(p_coord.astype(int)), tuple(target_coord.astype(int)), (255,0,255), 3, tipLength=0.2)
             
             possible_indices = kdtree.query_ball_point(pred_coord, r=search_radius)
             best_match, min_dist = -1, float('inf')
@@ -189,7 +190,7 @@ def _propagate_from_seed_wavefront(
                         local_direction_vectors[grid_map[grid_pos_query]][opposite_side_idx_map[j]] = -local_direction_vectors[best_match][j].copy()
 
                         if visualize:
-                            cv2.line(vis_img, tuple(all_coords[best_match].astype(int)), tuple(all_coords[grid_map[grid_pos_query]].astype(int)), (255,255,255), 1)
+                            cv2.line(vis_img, tuple(all_coords[best_match].astype(int)), tuple(all_coords[grid_map[grid_pos_query]].astype(int)), (0,255,0), 2)
 
             if visualize:
                 cv2.imshow(WIN_NAME, step_vis_img)
@@ -516,6 +517,7 @@ def _draw_hex_grids(
         return combined
 
 def auto_asymm_cricle_hexagon_matching(
+    img: np.ndarray,
     keypoints: List[cv2.KeyPoint],
     pattern_size: Tuple[int, int],
     visualize: bool = False
@@ -542,7 +544,7 @@ def auto_asymm_cricle_hexagon_matching(
         return None
 
     # --- Step 3: Propagate using the new WAVEFRONT method ---
-    grid_map = _propagate_from_seed_wavefront(best_seed_idx, all_coords, kdtree, pattern_size, visualize)
+    grid_map = _propagate_from_seed_wavefront(img, best_seed_idx, all_coords, kdtree, pattern_size, visualize)
 
     if grid_map is None:
         print("  [ FAIL ] Grid propagation from seed point failed.")

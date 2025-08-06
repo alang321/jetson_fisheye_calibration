@@ -246,7 +246,7 @@ def find_grid_in_image(img: np.ndarray, gray: np.ndarray, detector: cv2.SimpleBl
         return None
     
     print("  findCirclesGrid failed. Trying custom hexagonal finder...")
-    corners = auto_asymm_cricle_hexagon_matching(keypoints, pattern_size, visualize=args.visualize_hex_grid)
+    corners = auto_asymm_cricle_hexagon_matching(img, keypoints, pattern_size, visualize=args.visualize_hex_grid)
     if corners is not None:
         print("  Hexagonal auto-finder successful.")
         return corners
