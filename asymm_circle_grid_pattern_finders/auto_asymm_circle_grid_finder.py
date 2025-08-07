@@ -401,26 +401,23 @@ def _match_and_finalize_grid(
     elif min_remainder > 0 and not try_recovery:
         print(f"  [ WARN ] Found an affine transformation with {min_remainder} missing points, but recovery is disabled. Skipping recovery.")
         return None
+    
+    if visualize:
+        print("  [ INFO ] Visualizing all rotated hex grids and ideal grid for comparison...")
+        rotated_hex_grids = [rotate_hex_grid(hex_grid, i) for i in range(6)]
+        all_grids = [target_hex_grid] + rotated_hex_grids
+
+        labels = ['Ideal Grid'] + [f'Rotation {i * 60}°' for i in range(6)]
+
+        _draw_hex_grids(*all_grids, labels=labels)
 
     # build the final grid with the found coordinates
     if min_remainder != 0:
         print("  [ FAIL ] No valid affine transformation found that covers the ideal grid.")
 
-        rotated_hex_grids = [rotate_hex_grid(hex_grid, i) for i in range(6)]
-
-        if visualize:
-            print("  [ INFO ] Visualizing all rotated hex grids and ideal grid for comparison...")
-            all_grids = [target_hex_grid] + rotated_hex_grids
-
-            labels = ['Ideal Grid'] + [f'Rotation {i * 60}°' for i in range(6)]
-
-            _draw_hex_grids(*all_grids, labels=labels)
-
         if visualize: cv2.destroyAllWindows()
         return None
-    if visualize:
-        print(f"  [ OK ] Found affine transformation with r={best_r}, c={best_c}, rotation={best_rotation} steps.")
-
+    
     final_grid = []
 
     for i in range(num_rows):
