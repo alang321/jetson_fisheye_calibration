@@ -390,10 +390,18 @@ def main():
             if processed_gray is None:
                 print("  Skipped in debug mode.")
                 continue
+            # In debug mode, we only use the interactively chosen pre-processing
+            corners = find_grid_in_image(img_color, processed_gray, blob_detector, objp, pattern_size, args)
         else:
-            processed_gray = clahe.apply(gray)
-            
-        corners = find_grid_in_image(img_color, processed_gray, blob_detector, objp, pattern_size, args)
+            # In normal mode, first try with CLAHE for contrast enhancement.
+            print("Attempt 1: Detecting with CLAHE-processed image...")
+            processed_clahe = clahe.apply(gray)
+            corners = find_grid_in_image(img_color, processed_clahe, blob_detector, objp, pattern_size, args)
+
+            # If the first attempt fails, fall back to the raw grayscale image.
+            if corners is None:
+                print("\nAttempt 2: CLAHE failed, retrying with raw grayscale image...")
+                corners = find_grid_in_image(img_color, gray, blob_detector, objp, pattern_size, args)
 
         ask_confirm = args.no_confirm is not True
 
