@@ -5,12 +5,12 @@ import glob
 import argparse
 import sys
 import random
-import collections
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Set
 
 # Assuming your custom finder functions are in these files/modules
-from asymm_circle_grid_pattern_finders.auto_asymm_circle_grid_finder import auto_asymm_cricle_hexagon_matching
-from asymm_circle_grid_pattern_finders.assisted_asymm_circle_grid_finder import outer_corner_assisted_local_vector_walk
+from asymm_circle_helpers.auto_asymm_circle_grid_finder import auto_asymm_cricle_hexagon_matching
+from asymm_circle_helpers.assisted_asymm_circle_grid_finder import outer_corner_assisted_local_vector_walk
+from asymm_circle_helpers.evaluate_reprojection_results import report_and_visualize_results, calculate_reprojection_errors, create_error_heatmap, create_error_barchart
 
 # --- Configuration Constants ---
 DEFAULT_IMAGE_DIR = './calibration_images/'
@@ -116,100 +116,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--visualize_hex_grid', action='store_true', help='Visualize hexagonal auto grid detection.')
     return parser.parse_args()
 
-def report_and_visualize_results(
-    calib_data: Dict[str, Any],
-    img_shape: Tuple[int, int],
-    max_window_dim: int = 1200
-):
-    """
-    Prints final calibration results and shows coverage and undistortion visualizations.
-
-    Args:
-        calib_data: The dictionary returned by a successful calibration run.
-        img_shape: The (height, width) of the calibration images.
-        max_window_dim: The maximum dimension for visualization windows.
-    """
-    K = calib_data['K']
-    D = calib_data['D']
-    rms = calib_data['ret']
-    imgpoints = calib_data['imgpoints']
-    filenames = calib_data['filenames']
-    
-    # --- 1. Print Numerical Results ---
-    print("\n" + "="*40)
-    print("      Calibration Successful!")
-    print("="*40)
-    print(f"  Used {len(imgpoints)} views for final calibration.")
-    print(f"  RMS reprojection error: {rms:.4f} pixels")
-    print("\nCamera Matrix (K):")
-    print(K)
-    print("\nDistortion Coefficients (D) [k1, k2, k3, k4]:")
-    print(D.flatten())
-    print("="*40 + "\n")
-
-    # --- 2. Visualize Calibration Point Coverage ---
-    print("Visualizing overall calibration point coverage...")
-    coverage_img = np.full((img_shape[0], img_shape[1], 3), 255, dtype=np.uint8)
-    total_points = sum(len(view) for view in imgpoints)
-    
-    for view_corners in imgpoints:
-        for corner in view_corners:
-            center = tuple(corner[0].astype(int))
-            cv2.circle(coverage_img, center, 3, (255, 0, 0), -1)
-
-    cv2.putText(coverage_img, f"Coverage: {total_points} points from {len(imgpoints)} views",
-                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
-
-    WIN_NAME_COVERAGE = "Calibration Point Coverage"
-    cv2.namedWindow(WIN_NAME_COVERAGE, cv2.WINDOW_NORMAL)
-    h, w = img_shape
-    aspect_ratio = w / h
-    win_w = min(w, max_window_dim); win_h = int(win_w / aspect_ratio)
-    cv2.resizeWindow(WIN_NAME_COVERAGE, win_w, win_h)
-    cv2.imshow(WIN_NAME_COVERAGE, coverage_img)
-    print("-> Displaying coverage map. Press any key to continue...")
-    cv2.waitKey(0)
-
-    # --- 3. Visualize Undistortion ---
-    print("\nVisualizing undistortion on the first accepted sample image...")
-    if not filenames:
-        print("  No filenames recorded, cannot show undistortion.")
-        return
-
-    sample_img_path = filenames[0]
-    img_distorted = cv2.imread(sample_img_path)
-
-    if img_distorted is None:
-        print(f"  Warning: Could not reload sample image {sample_img_path}")
-        return
-
-    h, w = img_distorted.shape[:2]
-    image_size_wh = (w, h)
-    
-    # Generate the undistortion map
-    # Using balance=0.0 shows all source pixels (with black borders)
-    Knew = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(K, D, image_size_wh, np.eye(3), balance=0.0)
-    map1, map2 = cv2.fisheye.initUndistortRectifyMap(K, D, np.eye(3), Knew, image_size_wh, cv2.CV_16SC2)
-    img_undistorted = cv2.remap(img_distorted, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-    
-    # Create a side-by-side comparison
-    vis_compare = np.hstack((img_distorted, img_undistorted))
-
-    WIN_NAME_UNDISTORT = 'Distorted vs Undistorted'
-    cv2.namedWindow(WIN_NAME_UNDISTORT, cv2.WINDOW_NORMAL)
-    # Make the window wide enough for two images
-    h_vis, w_vis = vis_compare.shape[:2]
-    aspect_ratio = w_vis / h_vis
-    win_w = min(w_vis, max_window_dim * 2)
-    win_h = int(win_w / aspect_ratio)
-    cv2.resizeWindow(WIN_NAME_UNDISTORT, win_w, win_h)
-    
-    cv2.imshow(WIN_NAME_UNDISTORT, vis_compare)
-    print(f"-> Displaying undistortion result for {os.path.basename(sample_img_path)}. Press any key to exit.")
-    cv2.waitKey(0)
-
-
-
 def generate_object_points(pattern_size: Tuple[int, int], spacing: float) -> np.ndarray:
     """Generates the 3D real-world coordinates for the asymmetric grid."""
     cols, rows = pattern_size
@@ -294,6 +200,92 @@ def run_calibration(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], im
     
     print("Calibration failed after multiple removal attempts.")
     return None
+
+def refine_calibration_by_removing_outliers(
+    calib_data: Dict[str, Any],
+    image_size: Tuple[int, int]
+) -> Dict[str, Any]:
+    """
+    Analyzes per-view reprojection error and allows visual, interactive removal of outliers.
+    """
+    print("\n--- Analyzing Per-View Reprojection Errors ---")
+    
+    # --- 1. Calculate Per-View Errors (same as before) ---
+    objpoints, imgpoints, filenames = calib_data['objpoints'], calib_data['imgpoints'], calib_data['filenames']
+    K, D, rvecs, tvecs = calib_data['K'], calib_data['D'], calib_data['rvecs'], calib_data['tvecs']
+
+    per_view_errors = []
+    error_values = []
+    for i in range(len(objpoints)):
+        reprojected_pts, _ = cv2.fisheye.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, D)
+        error = cv2.norm(imgpoints[i], reprojected_pts, cv2.NORM_L2) / np.sqrt(len(reprojected_pts))
+        per_view_errors.append((error, filenames[i], i))
+        error_values.append(error)
+
+    # --- 2. Identify Outliers and Create Visualizations ---
+    mean_error = np.mean(error_values)
+    std_dev_error = np.std(error_values)
+    # An outlier is defined as any view with an error > mean + 2*std_dev
+    outlier_threshold = mean_error + 2.0 * std_dev_error
+    outlier_indices = {item[2] for item in per_view_errors if item[0] > outlier_threshold}
+    
+    print(f"Identifying outliers with RMS error > {outlier_threshold:.4f} (mean + 2*std)...")
+    barchart_img = create_error_barchart(per_view_errors, outlier_indices)
+    cv2.imshow("Per-View Errors", barchart_img)
+    print("-> Displaying error bar chart. Outliers highlighted in red. Press any key to continue...")
+    cv2.waitKey(0)
+    cv2.destroyWindow("Per-View Errors")
+    
+    # --- 3. Prompt User for Removal (same as before) ---
+    try:
+        default_remove = len(outlier_indices)
+        num_to_remove = int(input(f"\nEnter the number of worst images to remove and re-calibrate (suggests {default_remove}). Enter 0 to keep all: ") or default_remove)
+        if num_to_remove <= 0:
+            print("Keeping all views. No refinement will be performed.")
+            return calib_data
+    except (ValueError, TypeError):
+        print("Invalid input. No refinement will be performed.")
+        return calib_data
+
+    # --- 4. Perform Refinement (same as before) ---
+    per_view_errors.sort(key=lambda x: x[0], reverse=True) # Sort worst to best
+    indices_to_remove = {item[2] for item in per_view_errors[:num_to_remove]}
+    new_objpoints = [p for i, p in enumerate(objpoints) if i not in indices_to_remove]
+    new_imgpoints = [p for i, p in enumerate(imgpoints) if i not in indices_to_remove]
+    new_filenames = [f for i, f in enumerate(filenames) if i not in indices_to_remove]
+
+    print(f"\nRemoved {num_to_remove} views. Re-calibrating...")
+    refined_calib_data = run_calibration(new_objpoints, new_imgpoints, image_size, new_filenames)
+    
+    # --- 5. VISUALIZE THE EFFECT ---
+    if refined_calib_data:
+        print("Refinement successful! Visualizing the effect...")
+        
+        # Create "Before" heatmap
+        h, w = image_size[1], image_size[0]
+        points_before, _, errors_before = calculate_reprojection_errors(objpoints, imgpoints, rvecs, tvecs, K, D)
+        heatmap_before = create_error_heatmap((h, w), points_before, errors_before)
+        cv2.putText(heatmap_before, f"BEFORE (RMS: {calib_data['ret']:.4f})", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+
+        # Create "After" heatmap
+        points_after, _, errors_after = calculate_reprojection_errors(
+            refined_calib_data['objpoints'], refined_calib_data['imgpoints'],
+            refined_calib_data['rvecs'], refined_calib_data['tvecs'],
+            refined_calib_data['K'], refined_calib_data['D'])
+        heatmap_after = create_error_heatmap((h, w), points_after, errors_after)
+        cv2.putText(heatmap_after, f"AFTER (RMS: {refined_calib_data['ret']:.4f})", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+        
+        # Show side-by-side comparison
+        comparison_vis = np.hstack((heatmap_before, heatmap_after))
+        cv2.namedWindow("Refinement Effect: Before vs. After", cv2.WINDOW_NORMAL)
+        cv2.imshow("Refinement Effect: Before vs. After", comparison_vis)
+        print("-> Displaying before vs. after heatmaps. Notice the reduction in 'hot spots'. Press any key...")
+        cv2.waitKey(0)
+
+        return refined_calib_data
+    else:
+        print("Warning: Re-calibration failed. Returning original calibration data.")
+        return calib_data
 
 def save_calibration_results(filepath: str, img_shape: Tuple[int, int], calib_data: Dict[str, Any]):
     """Saves final calibration data to an .npz file."""
@@ -411,14 +403,16 @@ def main():
         return
 
     image_size_wh = (img_shape[1], img_shape[0])
-    calib_data = run_calibration(objpoints_all, imgpoints_all, image_size_wh, filenames_all)
+    initial_calib_data = run_calibration(objpoints_all, imgpoints_all, image_size_wh, filenames_all)
 
-    if calib_data:
-        # --- NEW: Call the reporting and visualization function here ---
-        report_and_visualize_results(calib_data, img_shape)
-        
-        # Then save the results as before
-        save_calibration_results(args.output, img_shape, calib_data)
+    if initial_calib_data:
+        # 2. Offer to refine the calibration by removing outliers
+        # The user will be prompted to remove N worst images
+        final_calib_data = refine_calibration_by_removing_outliers(initial_calib_data, image_size_wh)
+
+        # 3. Report and save the final results (either original or refined)
+        report_and_visualize_results(final_calib_data, img_shape)
+        save_calibration_results(args.output, img_shape, final_calib_data)
 
 
 if __name__ == '__main__':
