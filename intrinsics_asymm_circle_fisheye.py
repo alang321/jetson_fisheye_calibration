@@ -10,7 +10,7 @@ from typing import Optional, List, Tuple, Dict, Any, Set
 # Assuming your custom finder functions are in these files/modules
 from asymm_circle_helpers.auto_asymm_circle_grid_finder import auto_asymm_cricle_hexagon_matching
 from asymm_circle_helpers.assisted_asymm_circle_grid_finder import outer_corner_assisted_local_vector_walk
-from asymm_circle_helpers.evaluate_reprojection_results import report_and_visualize_results, calculate_reprojection_errors, create_error_heatmap, create_error_barchart
+from asymm_circle_helpers.evaluate_reprojection_results import report_and_visualize_results, calculate_reprojection_errors, create_error_heatmap, create_error_barchart, create_live_coverage_plot
 
 # --- Configuration Constants ---
 DEFAULT_IMAGE_DIR = './calibration_images/'
@@ -201,54 +201,97 @@ def run_calibration(objpoints: List[np.ndarray], imgpoints: List[np.ndarray], im
     print("Calibration failed after multiple removal attempts.")
     return None
 
+class SliderState:
+    def __init__(self, value=0):
+        self.value = value
+    def callback(self, val):
+        self.value = val
+
 def refine_calibration_by_removing_outliers(
     calib_data: Dict[str, Any],
     image_size: Tuple[int, int]
 ) -> Dict[str, Any]:
     """
-    Analyzes per-view reprojection error and allows visual, interactive removal of outliers.
+    Analyzes per-view reprojection error with a fully visual and interactive outlier removal tool.
+    This function allows the user to see the impact of removing high-error images
+    on both the error distribution and the spatial coverage of calibration points.
+
+    Args:
+        calib_data: The dictionary from an initial successful calibration.
+        image_size: The (width, height) of the calibration images.
+
+    Returns:
+        The final calibration data dictionary, which may be the refined version or the original.
     """
-    print("\n--- Analyzing Per-View Reprojection Errors ---")
+    print("\n--- Interactive Outlier Removal ---")
     
-    # --- 1. Calculate Per-View Errors (same as before) ---
+    # 1. Calculate Per-View Errors
     objpoints, imgpoints, filenames = calib_data['objpoints'], calib_data['imgpoints'], calib_data['filenames']
     K, D, rvecs, tvecs = calib_data['K'], calib_data['D'], calib_data['rvecs'], calib_data['tvecs']
 
     per_view_errors = []
-    error_values = []
     for i in range(len(objpoints)):
         reprojected_pts, _ = cv2.fisheye.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, D)
         error = cv2.norm(imgpoints[i], reprojected_pts, cv2.NORM_L2) / np.sqrt(len(reprojected_pts))
         per_view_errors.append((error, filenames[i], i))
-        error_values.append(error)
+        
+    per_view_errors.sort(key=lambda x: x[0], reverse=True) # Sort worst to best
 
-    # --- 2. Identify Outliers and Create Visualizations ---
-    mean_error = np.mean(error_values)
-    std_dev_error = np.std(error_values)
-    # An outlier is defined as any view with an error > mean + 2*std_dev
-    outlier_threshold = mean_error + 2.0 * std_dev_error
-    outlier_indices = {item[2] for item in per_view_errors if item[0] > outlier_threshold}
+    # 2. Setup and Run the Interactive Window
+    WIN_NAME = "Interactive Outlier Removal"
+    cv2.namedWindow(WIN_NAME, cv2.WINDOW_NORMAL)
     
-    print(f"Identifying outliers with RMS error > {outlier_threshold:.4f} (mean + 2*std)...")
-    barchart_img = create_error_barchart(per_view_errors, outlier_indices)
-    cv2.imshow("Per-View Errors", barchart_img)
-    print("-> Displaying error bar chart. Outliers highlighted in red. Press any key to continue...")
-    cv2.waitKey(0)
-    cv2.destroyWindow("Per-View Errors")
+    error_values = [e[0] for e in per_view_errors]
+    mean_error, std_dev_error = np.mean(error_values), np.std(error_values)
+    suggested_removals = sum(1 for e in error_values if e > mean_error + 1.5 * std_dev_error)
     
-    # --- 3. Prompt User for Removal (same as before) ---
-    try:
-        default_remove = len(outlier_indices)
-        num_to_remove = int(input(f"\nEnter the number of worst images to remove and re-calibrate (suggests {default_remove}). Enter 0 to keep all: ") or default_remove)
-        if num_to_remove <= 0:
-            print("Keeping all views. No refinement will be performed.")
-            return calib_data
-    except (ValueError, TypeError):
-        print("Invalid input. No refinement will be performed.")
+    slider_state = SliderState(suggested_removals)
+    max_removals = len(objpoints) - MIN_IMAGES_FOR_CALIB
+    cv2.createTrackbar("Remove N Worst", WIN_NAME, suggested_removals, max_removals, slider_state.callback)
+
+    print("-> Adjust the slider to select how many views to remove.")
+    print("   Review both the error chart and the coverage plot.")
+    print("   Press ENTER to confirm, or 'q' to cancel.")
+    
+    num_to_remove = -1
+    while True:
+        current_selection = slider_state.value
+        outlier_indices = {item[2] for item in per_view_errors[:current_selection]}
+        
+        # Generate both visualizations
+        barchart_img = create_error_barchart(per_view_errors, outlier_indices)
+        coverage_plot = create_live_coverage_plot(
+            (image_size[1], image_size[0]), # Pass (h, w)
+            imgpoints,                     # The original full list of points
+            per_view_errors,               # The error-sorted list
+            current_selection              # Current slider value
+        )
+
+        # Combine them into a single view for display
+        h_bar, w_bar = barchart_img.shape[:2]
+        h_cov, w_cov = coverage_plot.shape[:2]
+        new_h_bar = int(h_bar * w_cov / w_bar)
+        resized_barchart = cv2.resize(barchart_img, (w_cov, new_h_bar))
+
+        combined_vis = np.vstack((resized_barchart, coverage_plot))
+        
+        cv2.imshow(WIN_NAME, combined_vis)
+        
+        key = cv2.waitKey(20) & 0xFF
+        if key == 13: # ENTER key
+            num_to_remove = current_selection
+            break
+        if key == ord('q'):
+            num_to_remove = 0
+            break
+    
+    cv2.destroyAllWindows()
+    
+    # 3. Perform Refinement based on user's final selection
+    if num_to_remove <= 0:
+        print("Keeping all views. No refinement will be performed.")
         return calib_data
 
-    # --- 4. Perform Refinement (same as before) ---
-    per_view_errors.sort(key=lambda x: x[0], reverse=True) # Sort worst to best
     indices_to_remove = {item[2] for item in per_view_errors[:num_to_remove]}
     new_objpoints = [p for i, p in enumerate(objpoints) if i not in indices_to_remove]
     new_imgpoints = [p for i, p in enumerate(imgpoints) if i not in indices_to_remove]
@@ -257,12 +300,12 @@ def refine_calibration_by_removing_outliers(
     print(f"\nRemoved {num_to_remove} views. Re-calibrating...")
     refined_calib_data = run_calibration(new_objpoints, new_imgpoints, image_size, new_filenames)
     
-    # --- 5. VISUALIZE THE EFFECT ---
+    # 4. Visualize the Effect
     if refined_calib_data:
         print("Refinement successful! Visualizing the effect...")
+        h, w = image_size[1], image_size[0]
         
         # Create "Before" heatmap
-        h, w = image_size[1], image_size[0]
         points_before, _, errors_before = calculate_reprojection_errors(objpoints, imgpoints, rvecs, tvecs, K, D)
         heatmap_before = create_error_heatmap((h, w), points_before, errors_before)
         cv2.putText(heatmap_before, f"BEFORE (RMS: {calib_data['ret']:.4f})", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
@@ -279,8 +322,9 @@ def refine_calibration_by_removing_outliers(
         comparison_vis = np.hstack((heatmap_before, heatmap_after))
         cv2.namedWindow("Refinement Effect: Before vs. After", cv2.WINDOW_NORMAL)
         cv2.imshow("Refinement Effect: Before vs. After", comparison_vis)
-        print("-> Displaying before vs. after heatmaps. Notice the reduction in 'hot spots'. Press any key...")
+        print("-> Displaying before vs. after heatmaps. Press any key...")
         cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
         return refined_calib_data
     else:

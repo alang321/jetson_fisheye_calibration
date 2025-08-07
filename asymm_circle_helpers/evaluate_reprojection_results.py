@@ -196,3 +196,39 @@ def create_error_barchart(
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
         
     return vis_img
+
+def create_live_coverage_plot(
+    img_shape: Tuple[int, int],
+    all_imgpoints: List[np.ndarray],
+    sorted_per_view_errors: List[Tuple[float, str, int]],
+    num_to_remove: int
+) -> np.ndarray:
+    """Creates a live plot of point coverage, highlighting points from views to be removed."""
+    h, w = img_shape
+    vis_img = np.full((h, w, 3), 255, dtype=np.uint8)
+    
+    cv2.putText(vis_img, "Live Coverage Preview", (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+
+    # Get the original indices of the views that would be removed
+    indices_to_remove = {item[2] for item in sorted_per_view_errors[:num_to_remove]}
+
+    # Iterate through all original views and their points
+    for view_idx, view_points in enumerate(all_imgpoints):
+        points = view_points.squeeze().astype(int)
+        if view_idx in indices_to_remove:
+            # Draw points from "removed" views in red
+            for pt in points:
+                cv2.drawMarker(vis_img, tuple(pt), (0, 0, 255), cv2.MARKER_CROSS, 8, 1)
+        else:
+            # Draw points from "kept" views in blue
+            for pt in points:
+                cv2.circle(vis_img, tuple(pt), 3, (255, 100, 0), -1)
+
+    # Add a legend to explain the colors
+    cv2.circle(vis_img, (30, h - 60), 5, (255, 100, 0), -1)
+    cv2.putText(vis_img, "Kept View", (45, h - 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
+    cv2.drawMarker(vis_img, (35, h - 30), (0, 0, 255), cv2.MARKER_CROSS, 15, 2)
+    cv2.putText(vis_img, "To Be Removed", (45, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
+    
+    return vis_img
