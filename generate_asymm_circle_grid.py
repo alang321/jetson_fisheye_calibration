@@ -126,7 +126,7 @@ if __name__ == "__main__":
 
     parser.add_argument("-c", "--cols", type=int, default=11, help="Number of circles horizontally (wider dimension)")
     parser.add_argument("-r", "--rows", type=int, default=7, help="Number of circles vertically (narrower dimension)")
-    parser.add_argument("--radius", type=int, default=15, help="Base radius of each circle in pixels (before scaling)")
+    parser.add_argument("--radius", type=int, default=8, help="Base radius of each circle in pixels (before scaling)")
     parser.add_argument("--spacing", type=float, default=100.0, help="Base distance between circle centers in pixels (before scaling)")
     parser.add_argument("--margin", type=int, default=50, help="Base margin around the grid in pixels (before scaling)")
     parser.add_argument("--scale", type=float, default=10.0, help="Resolution multiplier. Scales radius, spacing, and margin.")
