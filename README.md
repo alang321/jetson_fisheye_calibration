@@ -31,6 +31,10 @@
    or as another example:
    ```bash
    python3 intrinsics_asymm_circle_fisheye.py --dir /home/anton/Downloads/dj6 --spacing 41.31428286 --debug --visualize_serpentine --visualize_hex_grid --visualize_asymmetric --cols 11 --rows 7
+   ```  
+   or what i usually use:
+   ```bash
+   python3 intrinsics_asymm_circle_fisheye.py --dir /home/anton/Downloads/dj6 --spacing 41.31428286 --debug --cols 11 --rows 7
    ```
 
 2. **Check Blob Detections**  

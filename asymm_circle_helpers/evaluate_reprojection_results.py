@@ -219,11 +219,11 @@ def create_live_coverage_plot(
         if view_idx in indices_to_remove:
             # Draw points from "removed" views in red
             for pt in points:
-                cv2.drawMarker(vis_img, tuple(pt), (0, 0, 255), cv2.MARKER_CROSS, 8, 1)
+                cv2.circle(vis_img, tuple(pt), 8, (0, 0, 255), -1)
         else:
             # Draw points from "kept" views in blue
             for pt in points:
-                cv2.circle(vis_img, tuple(pt), 3, (255, 100, 0), -1)
+                cv2.circle(vis_img, tuple(pt), 8, (255, 100, 0), -1)
 
     # Add a legend to explain the colors
     cv2.circle(vis_img, (30, h - 60), 5, (255, 100, 0), -1)

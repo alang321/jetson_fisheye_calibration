@@ -6,6 +6,7 @@ import argparse
 import sys
 import random
 from typing import Optional, List, Tuple, Dict, Any, Set
+import json
 
 # Assuming your custom finder functions are in these files/modules
 from asymm_circle_helpers.auto_asymm_circle_grid_finder import auto_asymm_cricle_hexagon_matching
@@ -338,17 +339,78 @@ def refine_calibration_by_removing_outliers(
         print("Warning: Re-calibration failed. Returning original calibration data.")
         return calib_data
 
-def save_calibration_results(filepath: str, img_shape: Tuple[int, int], calib_data: Dict[str, Any]):
-    """Saves final calibration data to an .npz file."""
-    print(f"\nSaving calibration data to: {filepath}")
+def save_calibration_results(filepath: str,
+                             img_shape: Tuple[int, int],
+                             calib_data: Dict[str, Any],
+                             camera_type: str = "imx219",
+                             binning: int = 1):
+    """
+    Saves calibration data in both .npz and full JSON format.
+
+    Parameters
+    ----------
+    filepath : str
+        Output path without extension.
+    img_shape : Tuple[int, int]
+        (width, height) of calibration images.
+    calib_data : Dict[str, Any]
+        Must contain keys: 'K', 'D', 'ret' (optional), etc.
+    camera_type : str
+        Identifier for the camera.
+    binning : int
+        Binning factor used during calibration.
+    """
+
+    npz_path = filepath if filepath.endswith(".npz") else filepath + ".npz"
+    json_path = filepath if filepath.endswith(".json") else filepath + ".json"
+
+    height, width = img_shape
+    print(f"\nSaving calibration data to: {npz_path} and {json_path}")
+
+    # Save as NPZ (for quick numpy reload)
     try:
-        np.savez(filepath, K=calib_data['K'], D=calib_data['D'], img_shape=img_shape, rms=calib_data['ret'],
-                 objpoints=np.array(calib_data['objpoints'], dtype=object),
-                 imgpoints=np.array(calib_data['imgpoints'], dtype=object),
-                 filenames=np.array(calib_data['filenames']))
-        print("Data saved successfully.")
+        np.savez(npz_path,
+                 K=calib_data['K'],
+                 D=calib_data['D'],
+                 img_shape=img_shape,
+                 rms=calib_data.get('rms', np.nan),
+                 objpoints=np.array(calib_data.get('objpoints', []), dtype=object),
+                 imgpoints=np.array(calib_data.get('imgpoints', []), dtype=object),
+                 filenames=np.array(calib_data.get('filenames', []))
+                 )
+        print("Saved .npz successfully.")
     except Exception as e:
-        print(f"Error saving data: {e}")
+        print(f"Error saving NPZ: {e}")
+
+    # Save full JSON structure
+    try:
+        json_dict = {
+            "camera_type": camera_type,
+            "calibration_resolution": {
+                "comment": "The resolution of the calibration image, ie how many of the sensors pixels are used. The binning value has to be correct.",
+                "width": width,
+                "height": height,
+                "binning": binning
+            },
+            "intrinsics": {
+                "cam_matrix_drone": calib_data['K'].tolist(),
+                "dist_coeff_drone": calib_data['D'][:4].flatten().tolist(),
+                "rms_reprojection_error": calib_data.get('ret', np.nan),
+                "dist_model": "fisheye"
+            },
+            "extrinsics": {
+                "comment": "Transformation from the camera frame to the drone body frame. Rotation in radians (roll, pitch, yaw) and translation in meters.",
+                "camera_euler_angles": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+                "translation": [0.0, 0.0, 0.0]
+            }
+        }
+
+        with open(json_path, "w") as f:
+            json.dump(json_dict, f, indent=4)
+        print("Saved full .json successfully.")
+    except Exception as e:
+        print(f"Error saving JSON: {e}")
+
 
 def main():
     """Main execution function."""
@@ -428,7 +490,11 @@ def main():
                 cv2.namedWindow('Detection Confirmation', cv2.WINDOW_NORMAL)
                 cv2.resizeWindow('Detection Confirmation', vis_w, vis_h)
                 cv2.imshow('Detection Confirmation', vis_small)
-                key = cv2.waitKey(0) & 0xFF
+                while True:
+                    print("  Press 'y' to accept, 'n' to reject, 'q' to quit.")
+                    key = cv2.waitKey(0) & 0xFF
+                    if key in [ord('y'), ord('n'), ord('q')]:
+                        break
                 if key == ord('y'):
                     print("  Accepted.")
                     accepted += 1
@@ -438,9 +504,11 @@ def main():
                 elif key == ord('q'):
                     print("Quitting.")
                     break
-                else:
+                elif key == ord('n'):
                     rejected += 1
                     print("  Rejected.")
+                else:
+                    print("  Invalid key. Skipping.")
                 cv2.destroyWindow('Detection Confirmation')
             else:
                 # auto-accept without prompt
