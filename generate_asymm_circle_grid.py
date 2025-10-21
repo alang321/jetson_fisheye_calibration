@@ -129,7 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--radius", type=int, default=15, help="Base radius of each circle in pixels (before scaling)")
     parser.add_argument("--spacing", type=float, default=100.0, help="Base distance between circle centers in pixels (before scaling)")
     parser.add_argument("--margin", type=int, default=50, help="Base margin around the grid in pixels (before scaling)")
-    parser.add_argument("--scale", type=float, default=1.0, help="Resolution multiplier. Scales radius, spacing, and margin.")
+    parser.add_argument("--scale", type=float, default=10.0, help="Resolution multiplier. Scales radius, spacing, and margin.")
     parser.add_argument("-o", "--output", type=str, default="asymmetric_circles_grid.png", help="Output image filename (e.g., grid.png)")
 
     args = parser.parse_args()
