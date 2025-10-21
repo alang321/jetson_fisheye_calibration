@@ -2,20 +2,10 @@
 
 ## 1. Capturing Images
 
-1. Connect both Drone and Laptop to a fast local network.
-
-2.
+1. Connect both Drone and Laptop to same local network.
 
 1. **Start the Video Stream from the Drone**  
    Copy `server.py` to the drone and run it to start streaming the camera feed.
-
-2. **Open the Video Stream on Your Laptop**  
-   On your laptop, use the following GStreamer command to view the stream:
-
-   ```bash
-   gst-launch-1.0 udpsrc port=5000 caps="application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96" \
-     ! rtph264depay ! decodebin ! videoconvert ! autovideosink sync=false
-   ```
 
 3. **Capture Images**  
    Run `control.py` on your laptop. A window will pop up—click on it and press `'c'` to capture an image.
@@ -38,9 +28,9 @@
    ```bash
    python3 asymm_circle_fisheye.py --dir ./calibration_images/ --cols 11 --rows 7 --spacing 39
    ```
-   or with pretty manual detection visualization:
+   or as another example:
    ```bash
-   python3 asymm_circle_fisheye.py --dir ./calibration_images/ --cols 11 --rows 7 --spacing 39 --visualize_serpentine
+   python3 intrinsics_asymm_circle_fisheye.py --dir /home/anton/Downloads/dj6 --spacing 41.31428286 --debug --visualize_serpentine --visualize_hex_grid --visualize_asymmetric --cols 11 --rows 7
    ```
 
 2. **Check Blob Detections**  

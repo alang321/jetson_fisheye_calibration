@@ -68,8 +68,8 @@ class InteractiveTuner:
         h, w = color_img.shape[:2]
         vis_h = 350
         vis_w = int(w * vis_h / h) if h > 0 else 0
-        
-        print(f"[q] Quit | [s] Save & Exit | [space] Accept | [m] Change Preproc ({desc}) | [t] Toggle Thresh Type | MinArea: {self.min_area} | MaxArea: {self.max_area}")
+
+        print(f"[q] Quit | [s] Save & Exit | [space] Accept | [m] Change Preproc | [t] Toggle Thresh Type | MinArea: {self.min_area} | MaxArea: {self.max_area}")
             
         while True:
             processed_gray, desc = self.get_processed_image(gray_img)
@@ -112,12 +112,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT_FILE, help=f'Output file for calibration data (.npz) (default: {DEFAULT_OUTPUT_FILE})')
     parser.add_argument('--ext', type=str, nargs='+', default=['jpg', 'png'], help='Image file extensions (default: jpg png)')
     parser.add_argument('--no_confirm', action='store_true', dest='no_confirm', help='Do not ask for confirmation before accepting detected grids.')
-    parser.add_argument('--no_manual_backup', action='store_true', dest='no_manual_backup', help='Do not save a backup of the original images.')
+    parser.add_argument('--no_manual_backup', action='store_true', dest='no_manual_backup', help='Do not use manual 4 corner finder if auto detect fails.')
     parser.add_argument('--try_recover_missing', action='store_true', dest='try_recover_missing', help='Attempt to recover missing grid points during hex search.')
     parser.add_argument('--debug', action='store_true', help='Run in interactive debug mode to tune blob detector parameters.')
     parser.add_argument('--visualize_serpentine', action='store_true', help='Visualize serpentine grid detection.')
     parser.add_argument('--visualize_hex_grid', action='store_true', help='Visualize hexagonal auto grid detection.')
-    parser.add_argument('--visualize_asymmetric', action='store_true', help='Visualize asymmetric circle grid detection.')
+    parser.add_argument('--visualize_asymmetric', action='store_true', help='Visualize the asymmetric pattern that will be searched for with dimensions.')
     return parser.parse_args()
 
 def generate_object_points(pattern_size: Tuple[int, int], spacing: float) -> np.ndarray:
