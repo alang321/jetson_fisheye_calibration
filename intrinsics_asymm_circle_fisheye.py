@@ -69,6 +69,8 @@ class InteractiveTuner:
         vis_h = 350
         vis_w = int(w * vis_h / h) if h > 0 else 0
         
+        print(f"[q] Quit | [s] Save & Exit | [space] Accept | [m] Change Preproc ({desc}) | [t] Toggle Thresh Type | MinArea: {self.min_area} | MaxArea: {self.max_area}")
+            
         while True:
             processed_gray, desc = self.get_processed_image(gray_img)
             
@@ -90,8 +92,6 @@ class InteractiveTuner:
             cv2.putText(vis_blobs, f'Blobs: {len(keypoints)}', (10, vis_h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
             cv2.putText(vis_proc, desc, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
 
-            print(f"[q] Quit | [s] Save & Exit | [space] Accept | [m] Change Preproc ({desc}) | [t] Toggle Thresh Type | MinArea: {self.min_area} | MaxArea: {self.max_area}")
-            
             debug_vis = np.hstack((vis_orig, vis_proc, vis_blobs))
             cv2.imshow('Debug View', debug_vis)
             
