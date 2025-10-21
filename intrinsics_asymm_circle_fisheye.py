@@ -11,6 +11,7 @@ from typing import Optional, List, Tuple, Dict, Any, Set
 from asymm_circle_helpers.auto_asymm_circle_grid_finder import auto_asymm_cricle_hexagon_matching
 from asymm_circle_helpers.assisted_asymm_circle_grid_finder import outer_corner_assisted_local_vector_walk
 from asymm_circle_helpers.evaluate_reprojection_results import report_and_visualize_results, calculate_reprojection_errors, create_error_heatmap, create_error_barchart, create_live_coverage_plot
+from asymm_circle_helpers.visualize_grid import visualize_asymmetric_pattern
 
 # --- Configuration Constants ---
 DEFAULT_IMAGE_DIR = './calibration_images/'
@@ -88,6 +89,8 @@ class InteractiveTuner:
             
             cv2.putText(vis_blobs, f'Blobs: {len(keypoints)}', (10, vis_h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
             cv2.putText(vis_proc, desc, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+
+            print(f"[q] Quit | [s] Save & Exit | [space] Accept | [m] Change Preproc ({desc}) | [t] Toggle Thresh Type | MinArea: {self.min_area} | MaxArea: {self.max_area}")
             
             debug_vis = np.hstack((vis_orig, vis_proc, vis_blobs))
             cv2.imshow('Debug View', debug_vis)
@@ -114,6 +117,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--debug', action='store_true', help='Run in interactive debug mode to tune blob detector parameters.')
     parser.add_argument('--visualize_serpentine', action='store_true', help='Visualize serpentine grid detection.')
     parser.add_argument('--visualize_hex_grid', action='store_true', help='Visualize hexagonal auto grid detection.')
+    parser.add_argument('--visualize_asymmetric', action='store_true', help='Visualize asymmetric circle grid detection.')
     return parser.parse_args()
 
 def generate_object_points(pattern_size: Tuple[int, int], spacing: float) -> np.ndarray:
@@ -350,7 +354,10 @@ def main():
     pattern_size = (args.cols, args.rows)
     objp = generate_object_points(pattern_size, args.spacing)
     image_files = find_image_files(args.dir, args.ext)
-    
+
+    if args.visualize_asymmetric:
+        visualize_asymmetric_pattern(args.cols, args.rows, args.spacing)
+
     # Setup Blob Detector
     params = cv2.SimpleBlobDetector_Params()
     params.filterByArea = True; params.minArea = 30; params.maxArea = 10000
