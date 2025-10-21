@@ -41,11 +41,9 @@ class InteractiveTuner:
         cv2.namedWindow('Controls', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Controls', 400, 200)
 
-        # --- FIX IS HERE: Cast self.min_area and self.max_area to int() ---
         cv2.createTrackbar('Manual Thresh', 'Controls', self.manual_thresh, 255, self._callback_thresh)
-        cv2.createTrackbar('Min Area', 'Controls', int(self.min_area), 5000, self._callback_min_area)
+        cv2.createTrackbar('Min Area', 'Controls', int(self.min_area), 1000, self._callback_min_area)
         cv2.createTrackbar('Max Area', 'Controls', int(self.max_area), 20000, self._callback_max_area)
-        # --- END FIX ---
 
     def get_processed_image(self, gray_img: np.ndarray) -> Tuple[np.ndarray, str]:
         """Applies the currently selected preprocessing filter."""
@@ -159,9 +157,11 @@ def find_grid_in_image(img: np.ndarray, gray: np.ndarray, detector: cv2.SimpleBl
         print("  No blobs detected, cannot attempt custom finders.")
         return None
     
+    avg_blob_size = np.mean([np.pi * (kp.size / 2)**2 for kp in keypoints])
+    
     print("  findCirclesGrid failed. Trying custom hexagonal finder...")
     try_recovery = args.try_recover_missing
-    corners = auto_asymm_cricle_hexagon_matching(img, keypoints, pattern_size, try_recovery=try_recovery, visualize=args.visualize_hex_grid)
+    corners = auto_asymm_cricle_hexagon_matching(img, keypoints, pattern_size, avg_blob_size, try_recovery=try_recovery, visualize=args.visualize_hex_grid)
     if corners is not None:
         print("  Hexagonal auto-finder successful.")
         return corners
@@ -363,7 +363,7 @@ def main():
 
     # Setup Blob Detector
     params = cv2.SimpleBlobDetector_Params()
-    params.filterByArea = True; params.minArea = 30; params.maxArea = 10000
+    params.filterByArea = True; params.minArea = 45; params.maxArea = 10000
     params.filterByCircularity = True; params.minCircularity = 0.5
     params.filterByConvexity = True; params.minConvexity = 0.80
     params.filterByInertia = True; params.minInertiaRatio = 0.1

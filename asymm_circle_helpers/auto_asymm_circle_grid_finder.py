@@ -334,6 +334,7 @@ def _match_and_finalize_grid(
     grid_map: Dict[Tuple[int, int], int],
     all_coords: np.ndarray,
     pattern_size: Tuple[int, int],
+    avg_blob_size: float,
     visualize: bool = False,
     try_recovery: bool = False,
     img_colors: np.ndarray = None
@@ -388,6 +389,7 @@ def _match_and_finalize_grid(
             new_grid_map,
             target_hex_grid,
             all_coords,
+            avg_blob_size,
             img_colors=img_colors,
             visualize=visualize
         )
@@ -444,6 +446,7 @@ def _recover_missing_points(
     best_grid_map: Dict[Tuple[int, int], int],
     target_hex_grid,
     all_coords: np.ndarray,
+    avg_blob_size: float,
     img_colors: np.ndarray,
     visualize: bool = False,
 ) -> Tuple[Optional[Dict[Tuple[int, int], int]], bool]:
@@ -525,13 +528,11 @@ def _recover_missing_points(
 
             # make image binary with adaptive thresholding
             gray_crop = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY)
-
-            #boost contrat and brightness
-            gray_crop = cv2.normalize(gray_crop, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-
             # now clahe
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            clahe_crop = clahe.apply(gray_crop)
+            clahe_crop = cv2.equalizeHist(gray_crop)
+            clahe_crop = cv2.GaussianBlur(clahe_crop, (5,5), 0)
+
 
             # The predicted point location within the crop
             predicted_pt_local = np.array([int(recovered_points[i][0]) - x_start,
@@ -541,21 +542,28 @@ def _recover_missing_points(
             best_blob_centroid = None
 
             # We can estimate a plausible area range from the average blob size
-            # This is a placeholder; a more robust way is to calculate this from the initial keypoints.
-            avg_blob_area = (point_distances[i] * 0.1)**2 * np.pi 
-            min_area = avg_blob_area * 0.1
-            max_area = avg_blob_area * 1.5
+            print(f"  [ INFO ] Average Blob Size: {avg_blob_size}")
+            min_area = avg_blob_size * 0.5
+            max_area = avg_blob_size * 1.5
 
             params = cv2.SimpleBlobDetector_Params()
             params.filterByArea = True
             params.minArea = min_area
             params.maxArea = max_area
-            params.filterByCircularity = True
+            params.filterByCircularity = False
             params.minCircularity = 0.4
 
             blob_detector = cv2.SimpleBlobDetector_create(params)
             keypoints = blob_detector.detect(clahe_crop)
             blob_centroids = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+
+            if visualize:
+                # draw the detected blobs on the crop
+                blob_vis = cv2.cvtColor(clahe_crop, cv2.COLOR_GRAY2BGR)
+                cv2.drawKeypoints(clahe_crop, keypoints, blob_vis, (0, 255, 0), cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+                cv2.imshow(f"Detected Blobs for Recovered Point {i+1}", blob_vis)
+                cv2.waitKey(0)
+                cv2.destroyWindow(f"Detected Blobs for Recovered Point {i+1}")
 
             # 3. Iterate through detected blobs (start from label 1 to skip the background)
             for centroid in blob_centroids:
@@ -610,6 +618,7 @@ def _recover_missing_points(
 
             cv2.imshow("Missing Points Visualization", vis_img)
             cv2.waitKey(0)
+            cv2.destroyWindow("Missing Points Visualization")
 
             #after fixing
             missing_points2 = target_hex_grid - set(new_grid_map.keys())
@@ -623,6 +632,10 @@ def _recover_missing_points(
 
             for pt in recovered_points:
                 cv2.circle(vis_img, (int(pt[0]), int(pt[1])), 1, (255, 0, 0), -1)
+
+            # downscale for better visualization
+            scale_factor = 800 / vis_img.shape[1]
+            vis_img = cv2.resize(vis_img, (0,0), fx=scale_factor, fy=scale_factor)
 
             cv2.imshow("Recovered Points", vis_img)
             cv2.waitKey(0)
@@ -745,6 +758,7 @@ def auto_asymm_cricle_hexagon_matching(
     img: np.ndarray,
     keypoints: List[cv2.KeyPoint],
     pattern_size: Tuple[int, int],
+    avg_blob_size: float,
     try_recovery: bool = False,
     num_seed_candidates: int = 3,
     visualize: bool = False
@@ -788,7 +802,7 @@ def auto_asymm_cricle_hexagon_matching(
             continue
 
         # Match, finalize, and recover missing points
-        final_grid = _match_and_finalize_grid(grid_map, all_coords, pattern_size, try_recovery=try_recovery, visualize=visualize, img_colors=img)
+        final_grid = _match_and_finalize_grid(grid_map, all_coords, pattern_size, avg_blob_size, try_recovery=try_recovery, visualize=visualize, img_colors=img)
 
         if final_grid is not None:
             if visualize: cv2.destroyAllWindows()
