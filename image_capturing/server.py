@@ -11,12 +11,14 @@ parser.add_argument("--video-port", type=int, default=5000)
 parser.add_argument("--command-port", type=int, default=5001)
 parser.add_argument("--lowres", action="store_true", help="Low-res live stream")
 parser.add_argument("--no-denoise", action="store_true", help="Disable Argus denoise and sharpening")
+parser.add_argument("--capture-width", type=int, default=1640, help="Capture width")
+parser.add_argument("--capture-height", type=int, default=1232, help="Capture height")
 args = parser.parse_args()
 # =========================================================
 
-CAPTURE_WIDTH = 1640
-CAPTURE_HEIGHT = 1232
-FRAMERATE = 20
+CAPTURE_WIDTH = args.capture_width
+CAPTURE_HEIGHT = args.capture_height
+FRAMERATE = 10
 
 STREAM_WIDTH = 320 if args.lowres else 1280
 STREAM_HEIGHT = 240 if args.lowres else 720
@@ -49,28 +51,23 @@ def build_pipeline_string():
 
     tee = "tee name=t"
 
-    # 2. Stream branch (low resolution)
     stream = (
         f"t. ! queue ! "
         f"nvvidconv ! video/x-raw(memory:NVMM), width=(int){STREAM_WIDTH}, height=(int){STREAM_HEIGHT}, format=(string)NV12 ! "
         f"nvv4l2h264enc bitrate={STREAM_BITRATE} insert-sps-pps=true ! "
-        f"h264parse ! mpegtsmux ! "
-        f"udpsink host={args.laptop_ip} port={args.video_port} sync=false async=false"
+        f"h264parse ! mpegtsmux ! udpsink host={args.laptop_ip} port={args.video_port} sync=false async=false"
     )
 
-    # 3. Capture branch (full res → CPU BGR)
+    # Capture branch (two nvvidconv stages for safety)
     capture = (
         f"t. ! queue ! "
-        f"nvvidconv ! video/x-raw, format=(string)BGRx, width=(int){CAPTURE_WIDTH}, height=(int){CAPTURE_HEIGHT} ! "
+        f"nvvidconv ! video/x-raw(memory:NVMM), width=(int){CAPTURE_WIDTH}, height=(int){CAPTURE_HEIGHT}, format=(string)NV12 ! "
+        f"nvvidconv ! video/x-raw, format=(string)BGRx ! "
         f"videoconvert ! video/x-raw, format=(string)BGR ! "
         f"appsink name=mysink emit-signals=True max-buffers=1 drop=True"
     )
 
-    pipeline = f"{source} ! {tee} {stream} {capture}"
-    print("\n--- GStreamer Pipeline ---")
-    print(pipeline)
-    print("--------------------------\n")
-    return pipeline
+    return f"{source} ! {tee} {stream} {capture}"
 
 
 
@@ -94,7 +91,7 @@ def command_listener():
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("0.0.0.0", args.command_port))
         s.listen()
-        print(f"📡 Command listener on port {args.command_port}")
+        print(f"Command listener on port {args.command_port}")
 
         while True:
             conn, addr = s.accept()
@@ -106,7 +103,7 @@ def command_listener():
                         break
                     cmd = data.decode().strip().upper()
                     if cmd == "CAPTURE":
-                        print("📸 Capture command received!")
+                        print("Capture command received!")
                         with capture_lock:
                             capture_requested = True
                         conn.sendall(b"ACK")
