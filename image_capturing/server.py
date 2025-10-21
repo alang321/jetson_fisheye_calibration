@@ -2,7 +2,7 @@
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
-import cv2, numpy as np, socket, threading, time, os, sys, argparse, struct
+import cv2, numpy as np, socket, threading, time, os, sys, argparse, struct, queue
 
 # ================= Configuration via CLI =================
 parser = argparse.ArgumentParser(description="Jetson Drone Video + Capture Server")
@@ -13,12 +13,13 @@ parser.add_argument("--lowres", action="store_true", help="Low-res live stream")
 parser.add_argument("--no-denoise", action="store_true", help="Disable Argus denoise and sharpening")
 parser.add_argument("--capture-width", type=int, default=1640, help="Capture width")
 parser.add_argument("--capture-height", type=int, default=1232, help="Capture height")
+parser.add_argument("--fps", type=int, default=20, help="Capture framerate")
 args = parser.parse_args()
 # =========================================================
 
 CAPTURE_WIDTH = args.capture_width
 CAPTURE_HEIGHT = args.capture_height
-FRAMERATE = 10
+FRAMERATE = args.fps
 
 STREAM_WIDTH = 320 if args.lowres else 1280
 STREAM_HEIGHT = 240 if args.lowres else 720
@@ -35,6 +36,11 @@ latest_frame = None
 frame_lock = threading.Lock()
 frame_count = 0
 os.makedirs(SAVE_DIR, exist_ok=True)
+
+# --- Synchronization additions ---
+capture_complete_event = threading.Event()
+last_saved_file_path = None
+# ---------------------------------
 
 
 # ========== Build GStreamer pipeline ==========
@@ -86,7 +92,7 @@ def send_image(conn, image_path):
 
 # ========== Command listener ==========
 def command_listener():
-    global capture_requested
+    global capture_requested, last_saved_file_path
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("0.0.0.0", args.command_port))
@@ -104,13 +110,32 @@ def command_listener():
                     cmd = data.decode().strip().upper()
                     if cmd == "CAPTURE":
                         print("Capture command received!")
+                        
+                        # --- Modified Logic ---
                         with capture_lock:
                             capture_requested = True
-                        conn.sendall(b"ACK")
-                        # Wait for image to be saved and send it
-                        time.sleep(0.3)
-                        last_file = sorted(os.listdir(SAVE_DIR))[-1]
-                        send_image(conn, os.path.join(SAVE_DIR, last_file))
+                            capture_complete_event.clear() # Clear event for this new request
+                        
+                        print("Waiting for capture to complete...")
+                        # Wait for the main loop to save the file
+                        if not capture_complete_event.wait(timeout=5.0): # 5 sec timeout
+                            print("Capture timed out.")
+                            conn.sendall(b"ERR")
+                            continue
+
+                        # Event is set, get the filename
+                        with capture_lock:
+                            file_to_send = last_saved_file_path
+                        
+                        if file_to_send:
+                            print(f"File {file_to_send} is ready.")
+                            conn.sendall(b"ACK") # Send ACK *now*
+                            send_image(conn, file_to_send)
+                        else:
+                            print("Capture failed (no frame).")
+                            conn.sendall(b"ERR")
+                        # --- End Modified Logic ---
+                            
                     else:
                         conn.sendall(b"UNKNOWN")
                 print(f"Disconnected from {addr}")
@@ -178,18 +203,34 @@ def main():
     loop = GLib.MainLoop()
 
     def check_capture():
-        global capture_requested, latest_frame, frame_count
-        if capture_requested:
-            with capture_lock:
-                capture_requested = False
+        global capture_requested, latest_frame, frame_count, last_saved_file_path
+        
+        local_capture_requested = False
+        with capture_lock:
+            if capture_requested:
+                local_capture_requested = True
+                capture_requested = False # Consume the request
+        
+        if local_capture_requested:
             with frame_lock:
                 frame = latest_frame.copy() if latest_frame is not None else None
+            
             if frame is not None:
                 fname = os.path.join(SAVE_DIR, f"{IMAGE_PREFIX}{time.strftime('%Y%m%d_%H%M%S')}_{frame_count:04d}{IMAGE_FORMAT}")
-                cv2.imwrite(fname, frame)
+                cv2.imwrite(fname, frame) # This is the long operation
                 print(f"Saved {fname}")
                 frame_count += 1
-        return True
+                
+                with capture_lock:
+                    last_saved_file_path = fname
+                capture_complete_event.set() # Signal completion
+            else:
+                print("Capture requested but no frame available.")
+                with capture_lock:
+                    last_saved_file_path = None # Signal failure
+                capture_complete_event.set() # Signal (with failure)
+                
+        return True # Keep the GLib timer running
 
     GLib.timeout_add(100, check_capture)
     try:

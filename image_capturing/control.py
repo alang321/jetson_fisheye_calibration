@@ -19,24 +19,32 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 def receive_image(sock):
     """Receives one image and saves it."""
-    header = sock.recv(8)
-    if not header:
-        print("No image size header received.")
-        return
-    size = struct.unpack("<Q", header)[0]
-    print(f"Receiving image ({size} bytes)...")
+    try:
+        header = sock.recv(8)
+        if not header:
+            print("Connection closed while waiting for image size.")
+            return
+        size = struct.unpack("<Q", header)[0]
+        print(f"Receiving image ({size} bytes)...")
 
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        data += chunk
-
-    filename = os.path.join(SAVE_DIR, f"capture_{time.strftime('%Y%m%d_%H%M%S')}.png")
-    with open(filename, "wb") as f:
-        f.write(data)
-    print(f"Saved {filename}")
+        data = b""
+        while len(data) < size:
+            chunk = sock.recv(4096)
+            if not chunk:
+                print("Connection closed during image transfer.")
+                break
+            data += chunk
+        
+        if len(data) == size:
+            filename = os.path.join(SAVE_DIR, f"capture_{time.strftime('%Y%m%d_%H%M%S')}.png")
+            with open(filename, "wb") as f:
+                f.write(data)
+            print(f"Saved {filename}")
+        else:
+            print("Image transfer incomplete.")
+            
+    except Exception as e:
+        print(f"Error in receive_image: {e}")
 
 
 def main():
@@ -74,9 +82,17 @@ def main():
         elif key == ord("c"):
             print("Requesting capture...")
             sock.sendall(b"CAPTURE")
-            resp = sock.recv(3)
+            
+            # --- Modified Logic ---
+            # Wait for ACK or ERR
+            resp = sock.recv(3) 
             if resp == b"ACK":
                 receive_image(sock)
+            elif resp == b"ERR":
+                print("Server: Capture failed (timeout or no frame).")
+            else:
+                print(f"Server: Unknown response: {resp}")
+            # --- End Modified Logic ---
 
     cap.release()
     sock.close()
