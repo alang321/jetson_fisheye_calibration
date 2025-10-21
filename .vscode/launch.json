@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug Fisheye Calibration",
+            "name": "Debug Fisheye Calibration Viz",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/intrinsics_asymm_circle_fisheye.py",
@@ -18,10 +18,32 @@
                 "--cols", "11",
                 "--rows", "7",
                 "--spacing", "41.31428286",
+                "--try_recover_missing",
                 "--debug",
                 "--visualize_serpentine",
                 "--visualize_hex_grid",
                 "--visualize_asymmetric"
+            ]
+        },
+        {
+            "name": "Debug Fisheye Calibration Fast",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/intrinsics_asymm_circle_fisheye.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "GSK_RENDERER": "cairo",
+                "MPLBACKEND": "TkAgg"
+            },
+            "args": [
+                "--dir", "/home/anton/Downloads/dj6",
+                "--cols", "11",
+                "--rows", "7",
+                "--spacing", "41.31428286",
+                "--try_recover_missing",
+                "--no_manual_backup"
             ]
         }
     ]
