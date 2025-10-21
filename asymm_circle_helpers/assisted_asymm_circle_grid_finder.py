@@ -245,7 +245,7 @@ def _walk_grid_with_local_vectors(
     avg_diag = (np.linalg.norm(tl - br) + np.linalg.norm(tr - bl)) / 2.0
     grid_diag = np.sqrt((cols - 1)**2 + (rows - 1)**2) if cols > 1 and rows > 1 else 1
     approx_spacing = avg_diag / grid_diag if grid_diag > 0 else 50.0
-    search_radius = approx_spacing * 0.75
+    search_radius = approx_spacing * 0.9
     max_dist_sq = search_radius**2
     print(f"  Approx pixel spacing: {approx_spacing:.1f}px, Search Radius: {search_radius:.1f}px")
 
@@ -301,7 +301,8 @@ def _walk_grid_with_local_vectors(
             for idx in range(len(all_kp_coords)):
                 pt_int = tuple(all_kp_coords[idx].astype(int))
                 is_available = idx in available_indices
-                is_found = not np.isnan(final_corners[:, 0, 0])[np.all(final_corners[:, 0, :] == all_kp_coords[idx], axis=1)]
+                # Check if this point is already in final_corners (within small tolerance)
+                is_found = np.any(np.all(np.isclose(final_corners[:, 0, :], all_kp_coords[idx], atol=1e-3), axis=1))
                 color = (180, 180, 180) if is_available else (0, 180, 0)
                 size = 3 if is_available else 5
                 cv2.circle(vis_step, pt_int, size, color, -1 if is_found else 1)

@@ -70,7 +70,10 @@ class InteractiveTuner:
         vis_w = int(w * vis_h / h) if h > 0 else 0
 
         print(f"[q] Quit | [s] Save & Exit | [space] Accept | [m] Change Preproc | [t] Toggle Thresh Type | MinArea: {self.min_area} | MaxArea: {self.max_area}")
-            
+        
+        if cv2.getWindowProperty('Controls', cv2.WND_PROP_VISIBLE) < 1:
+            self.setup_windows()
+
         while True:
             processed_gray, desc = self.get_processed_image(gray_img)
             
